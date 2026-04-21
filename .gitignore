@@ -1,0 +1,13 @@
+dist/
+*.o
+*.a
+*.efi
+*.bin
+*.iso
+memtest86plus/build/x86_64/*.o
+memtest86plus/build/x86_64/memtest*
+memtest86plus/build/i586/
+memtest86plus/system/a1990/
+*.bak
+.DS_Store
+memtest86plus/

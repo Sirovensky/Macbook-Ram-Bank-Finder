@@ -1,0 +1,12 @@
+--- a/app/main.c
++++ b/app/main.c
+@@ -261,6 +261,10 @@ void main(void)
+     display_init();
+
+     error_init();
++
++    /* A1990: dump IMC config to message area once at startup. */
++    extern void a1990_calibrate(void);
++    a1990_calibrate();
+
+     cpu_temp_init();

@@ -1,0 +1,12 @@
+--- a/app/error.c
++++ b/app/error.c
+@@ -164,6 +164,9 @@ static void common_err(error_type_t type, uintptr_t addr, testword_t good, test
+     last_error_mode = error_mode;
+
+     testword_t xor = good ^ bad;
++
++    extern void a1990_report_error(uint64_t addr, uint64_t xor_bits);
++    if (type == DATA_ERROR || type == ADDR_ERROR) a1990_report_error((uint64_t)addr, (uint64_t)xor);
+
+     bool new_stats = false;
+     testword_t page   = page_of((void *)addr);
