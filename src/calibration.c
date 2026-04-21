@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// First-boot calibration: dump IMC register state to the scroll area so
-// the user can photograph the values and feed them back into the
-// topology tables.
+// First-boot calibration: dump IMC register state + board detection to
+// the scroll area so contributors can photograph the values and feed
+// them into new YAML topology files.
 
 #include "stdint.h"
 #include "stdbool.h"
 
 #include "display.h"
 
-#include "a1990_topology.h"
+#include "board_topology.h"
 #include "cfl_decode.h"
 #include "smbios.h"
 
-// memtest86plus scroll helper symbols
 extern int scroll_message_row;
 extern void scroll(void);
 
@@ -22,9 +21,9 @@ extern void scroll(void);
     scroll();                                            \
 } while (0)
 
-void a1990_calibrate(void)
+void board_calibrate(void)
 {
-    LOG("=== A1990-MEMTEST CALIBRATION ===");
+    LOG("=== BOARD-MEMTEST CALIBRATION ===");
 
     const char *prod = smbios_board_id();
     LOG("SMBIOS product: %s", prod ? prod : "(unknown)");
@@ -57,12 +56,13 @@ void a1990_calibrate(void)
 
     cfl_dump_mchbar();
 
-    const a1990_topology_t *topo = a1990_detect();
-    if (topo) {
-        LOG("Detected: %s (%u packages x%u)",
-            topo->variant_name, topo->package_count, topo->chip_width);
+    const board_profile_t *p = board_detect();
+    if (p) {
+        LOG("Detected board: %s (%u packages x%u, %u ch, %u rk)",
+            p->friendly_name, p->package_count, p->chip_width,
+            p->channels, p->ranks_per_channel);
     } else {
-        LOG("No A1990 topology match. Generic decode only.");
+        LOG("No board overlay match. Generic tier-1 decode only.");
     }
 
     LOG("=== calibration done; tests starting ===");

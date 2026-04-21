@@ -1,0 +1,53 @@
+# MacBook Pro 15" 2018/2019 (A1990) — logic board 820-01814-a
+#
+# Source: vendor/820-01814-schematic.pdf (Apple confidential, not shipped).
+# CPU: Coffee Lake-H i7/i9 (CFL-H-DDR4-IL).
+# RAM: 32GB DDR4-2400, 16 soldered BGA packages, x16 die.
+#
+# Channel mapping (per schematic text extract):
+#   CH A (DDR0):  U2300..U2330 rank 0  | U2400..U2430 rank 1
+#   CH B (DDR1):  U2500..U2530 rank 0  | U2600..U2630 rank 1
+#
+# Byte-lane mapping is TENTATIVE: derived from chip ordinal position
+# (U23x0/U23x1/U23x2/U23x3 covering lane pairs 0-1, 2-3, 4-5, 6-7) and
+# NOT from per-DQ net tracing. Must be confirmed with single-chip fault
+# injection before flipping `verified: true`.
+
+board_id: "820-01814-a"
+friendly_name: "MacBook Pro 15 2018/2019 (A1990) 32GB"
+products:
+  - "MacBookPro15,1"
+  - "MacBookPro15,3"
+
+chip_width: 16
+channels: 2
+ranks_per_channel: 2
+verified: false
+notes: |
+  Topology inferred from 820-01814 schematic designator groupings.
+  Per-lane mapping requires net-tracing or fault injection to confirm.
+
+packages:
+  # ---- Channel A, Rank 0 ----
+  - { designator: "U2300", channel: 0, rank: 0, byte_lane: 0, location_hint: "CH-A R0 lanes 0-1" }
+  - { designator: "U2310", channel: 0, rank: 0, byte_lane: 2, location_hint: "CH-A R0 lanes 2-3" }
+  - { designator: "U2320", channel: 0, rank: 0, byte_lane: 4, location_hint: "CH-A R0 lanes 4-5" }
+  - { designator: "U2330", channel: 0, rank: 0, byte_lane: 6, location_hint: "CH-A R0 lanes 6-7" }
+
+  # ---- Channel A, Rank 1 ----
+  - { designator: "U2400", channel: 0, rank: 1, byte_lane: 0, location_hint: "CH-A R1 lanes 0-1" }
+  - { designator: "U2410", channel: 0, rank: 1, byte_lane: 2, location_hint: "CH-A R1 lanes 2-3" }
+  - { designator: "U2420", channel: 0, rank: 1, byte_lane: 4, location_hint: "CH-A R1 lanes 4-5" }
+  - { designator: "U2430", channel: 0, rank: 1, byte_lane: 6, location_hint: "CH-A R1 lanes 6-7" }
+
+  # ---- Channel B, Rank 0 ----
+  - { designator: "U2500", channel: 1, rank: 0, byte_lane: 0, location_hint: "CH-B R0 lanes 0-1" }
+  - { designator: "U2510", channel: 1, rank: 0, byte_lane: 2, location_hint: "CH-B R0 lanes 2-3" }
+  - { designator: "U2520", channel: 1, rank: 0, byte_lane: 4, location_hint: "CH-B R0 lanes 4-5" }
+  - { designator: "U2530", channel: 1, rank: 0, byte_lane: 6, location_hint: "CH-B R0 lanes 6-7" }
+
+  # ---- Channel B, Rank 1 ----
+  - { designator: "U2600", channel: 1, rank: 1, byte_lane: 0, location_hint: "CH-B R1 lanes 0-1" }
+  - { designator: "U2610", channel: 1, rank: 1, byte_lane: 2, location_hint: "CH-B R1 lanes 2-3" }
+  - { designator: "U2620", channel: 1, rank: 1, byte_lane: 4, location_hint: "CH-B R1 lanes 4-5" }
+  - { designator: "U2630", channel: 1, rank: 1, byte_lane: 6, location_hint: "CH-B R1 lanes 6-7" }

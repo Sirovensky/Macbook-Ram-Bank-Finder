@@ -5,8 +5,8 @@
 
      error_init();
 +
-+    /* A1990: dump IMC config to message area once at startup. */
-+    extern void a1990_calibrate(void);
-+    a1990_calibrate();
++    /* Dump IMC config + board detection to message area once at startup. */
++    extern void board_calibrate(void);
++    board_calibrate();
 
      cpu_temp_init();
