@@ -7,7 +7,6 @@
 #include "string.h"
 
 #include "board_topology.h"
-#include "smbios.h"
 
 static bool product_matches(const board_profile_t *p, const char *product)
 {

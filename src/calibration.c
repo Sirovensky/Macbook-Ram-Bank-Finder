@@ -11,7 +11,6 @@
 
 #include "board_topology.h"
 #include "cfl_decode.h"
-#include "smbios.h"
 
 extern int scroll_message_row;
 extern void scroll(void);

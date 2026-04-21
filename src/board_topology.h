@@ -54,4 +54,8 @@ const board_package_t *board_lookup(const board_profile_t *p,
                                     uint8_t rank,
                                     uint8_t byte_lane);
 
+// SMBIOS Type 1 productname accessor (implemented in smbios.c, wraps
+// memtest86plus's DMI parser).
+const char *smbios_board_id(void);
+
 #endif // BOARD_TOPOLOGY_H

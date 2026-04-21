@@ -49,7 +49,11 @@ if ! grep -q "board/board_topology.o" "$mk"; then
     for o in "${objs[@]}"; do inject+="           system/${o} \\\\\n"; done
     awk -v inject="$inject" '
         /system\/x86\/vmem\.o/ && !done {
-            print $0
+            # Ensure line ends with continuation backslash.
+            line = $0
+            sub(/[[:space:]]+$/, "", line)
+            if (substr(line, length(line)) != "\\") line = line " \\"
+            print line
             printf "%s", inject
             done = 1; next
         }
@@ -57,6 +61,22 @@ if ! grep -q "board/board_topology.o" "$mk"; then
     ' "$mk" > "$mk.new" && mv "$mk.new" "$mk"
     sed -i.bak 's|-I../../tests|-I../../system/board -I../../tests|' "$mk"
     rm -f "$mk.bak"
+fi
+
+# 3b. Add a pattern rule for system/board/%.o (upstream's system/%.o rule
+# only mkdirs `system`, not `system/board`).
+if ! grep -q "^system/board/%.o:" "$mk"; then
+    echo "==> adding system/board pattern rule"
+    awk '
+        /^system\/%\.o: \.\.\/\.\.\/system\/%\.c/ && !done {
+            done = 1
+            print "system/board/%.o: ../../system/board/%.c"
+            print "\t@mkdir -p system/board"
+            print "\t$(CC) -c $(CFLAGS) $(OPT_SMALL) $(INC_DIRS) -o $@ $< -MMD -MP -MT $@ -MF $(@:.o=.d)"
+            print ""
+        }
+        { print }
+    ' "$mk" > "$mk.new" && mv "$mk.new" "$mk"
 fi
 
 # 4. Apply source patches.
