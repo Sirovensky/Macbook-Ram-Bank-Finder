@@ -1,0 +1,20 @@
+--- a/app/error.c
++++ b/app/error.c
+@@ -279,7 +279,16 @@ static void common_err(error_type_t type, uintptr_t addr, testword_t good, test
+             break;
+         }
+         if (new_address) {
+-            check_input();
++            // BRR: do NOT call check_input() here.
++            //
++            // common_err() runs under error_mutex.  check_input() branches
++            // on '1' into config_menu(), which is an interactive modal
++            // blocking on keyboard input.  On A1990 (T2) the post-EBS
++            // keyboard path injects phantom keycodes; a stray '1' would
++            // open the config menu while holding error_mutex and deadlock
++            // the whole test.  ESC-handling is preserved via do_tick's
++            // own BSP-only check_input() (app/display.c) which runs
++            // outside this mutex.
+             scroll();
+
+             set_foreground_colour(YELLOW);

@@ -171,5 +171,10 @@ apply_patch 0010-panic-auto-reboot.patch       "auto-reboot in 60 s"   "app/x86/
 # flips ON (stray space-bar event from T2 HID proxy).  Patch short-circuits
 # the wait loop.  See patch 0011 header comment for full rationale.
 apply_patch 0011-scroll-never-block.patch      "BRR: non-blocking scroll" "app/display.c"
+# T2 common_err() deadlock: check_input() inside common_err (under
+# error_mutex) would open config_menu() on a stray '1' keycode from the
+# T2 HID proxy, freezing the test.  Drop the call — do_tick's own BSP-
+# only check_input (outside the mutex) still handles ESC.
+apply_patch 0012-no-check-input-in-common-err.patch "BRR: do NOT call check_input" "app/error.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"
