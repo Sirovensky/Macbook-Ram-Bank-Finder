@@ -171,12 +171,18 @@ void board_decode_pass(void)
     unsigned nskip = badmem_log_skip_count();
     if (nskip > 0) {
         const struct badmem_skip_range *skips = badmem_log_skip_list(&nskip);
-        display_scrolled_message(0, "[skip] excluded %u 1MiB region(s) this pass:", nskip);
+        display_scrolled_message(0, "[skip] excluded %u region(s) this pass:", nskip);
         scroll();
+        // Each 1 MiB skip entry is masked by the shim as a 2 MiB
+        // reservation (+/- 1 MiB expansion on next boot).
         for (unsigned i = 0; i < nskip; i++) {
-            display_scrolled_message(0, "  SKIP %016x - %016x",
-                                     (uintptr_t)skips[i].start,
-                                     (uintptr_t)skips[i].end);
+            uintptr_t sz_mb = (uintptr_t)((skips[i].end - skips[i].start) >> 20);
+            display_scrolled_message(0,
+                "  %u hit(s) skipped %016x - %016x (%u MiB, shim masks +/-1MiB)",
+                (uintptr_t)skips[i].hits,
+                (uintptr_t)skips[i].start,
+                (uintptr_t)skips[i].end,
+                sz_mb);
             scroll();
         }
     }

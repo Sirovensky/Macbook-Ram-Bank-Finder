@@ -75,7 +75,16 @@ void badmem_log_add_skip(uint64_t start_pa, uint64_t end_pa);
 // Query current skip list (pointer into internal storage + count).
 // Caller must not mutate; safe to hold the pointer across calls only if
 // no new bursts are being recorded.  Used by board_prune_vm_map().
-struct badmem_skip_range { uint64_t start; uint64_t end; };
+//
+// `hits` counts how many distinct burst triggers landed in this region
+// (including merges from add_skip calls on overlapping ranges).  A
+// healthy 1 MiB region with a single scattered error will show hits=1;
+// a badly failing chip hammering the same area will show hits>>1.
+struct badmem_skip_range {
+    uint64_t start;
+    uint64_t end;
+    uint32_t hits;
+};
 const struct badmem_skip_range *badmem_log_skip_list(unsigned *out_count);
 
 // Count of skip regions currently recorded.  Used by pass-end summary

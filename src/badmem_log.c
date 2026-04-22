@@ -200,18 +200,21 @@ void badmem_log_add_skip(uint64_t start_pa, uint64_t end_pa)
     if (end_pa <= start_pa) return;
 
     // Dedup / merge: if the new range overlaps or abuts an existing one,
-    // grow the existing entry and return.  This keeps chains of adjacent
-    // 1 MiB bursts from saturating the table.
+    // grow the existing entry AND bump its hit counter.  Chains of
+    // adjacent 1 MiB bursts coalesce into one entry whose hit count
+    // reflects how many distinct burst triggers contributed to it.
     for (unsigned i = 0; i < skip_list_count; i++) {
         if (end_pa < skip_list[i].start || start_pa > skip_list[i].end) continue;
         if (start_pa < skip_list[i].start) skip_list[i].start = start_pa;
         if (end_pa   > skip_list[i].end)   skip_list[i].end   = end_pa;
+        if (skip_list[i].hits < 0xFFFFFFFFu) skip_list[i].hits++;
         return;
     }
 
     if (skip_list_count < SKIP_MAX) {
         skip_list[skip_list_count].start = start_pa;
         skip_list[skip_list_count].end   = end_pa;
+        skip_list[skip_list_count].hits  = 1;
         skip_list_count++;
     }
     // If the table overflows we've already masked ~64 MiB in 1 MiB chunks —
