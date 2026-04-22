@@ -27,7 +27,9 @@ fi
 dst="$mt/system/board"
 echo "==> syncing src/ -> $dst/"
 mkdir -p "$dst"
+mkdir -p "$dst/imc"
 cp "$here"/src/*.c "$here"/src/*.h "$dst/"
+cp "$here"/src/imc/*.c "$dst/imc/"
 
 # Rename smbios.c to avoid linker clash with memtest86plus's own system/smbios.c.
 [[ -f "$dst/smbios.c" ]] && mv "$dst/smbios.c" "$dst/smbios_wrap.c"
@@ -38,11 +40,14 @@ objs=(
     "board/board_topology.o"
     "board/board_table.o"
     "board/cfl_decode.o"
+    "board/imc_dispatch.o"
+    "board/imc/cfl_skl_kbl.o"
     "board/error_hook.o"
     "board/badmem_log.o"
     "board/smbios_wrap.o"
     "board/calibration.o"
     "board/efi_menu.o"
+    "board/decoder_selftest.o"
 )
 
 if ! grep -q "board/board_topology.o" "$mk"; then
@@ -85,8 +90,8 @@ else
     done
 fi
 
-# 3b. Add a pattern rule for system/board/%.o (upstream's system/%.o rule
-# only mkdirs `system`, not `system/board`).
+# 3b. Add pattern rules for system/board/%.o and system/board/imc/%.o
+# (upstream's system/%.o rule only mkdirs `system`, not the subdirs).
 if ! grep -q "^system/board/%.o:" "$mk"; then
     echo "==> adding system/board pattern rule"
     awk '
@@ -96,6 +101,23 @@ if ! grep -q "^system/board/%.o:" "$mk"; then
             print "\t@mkdir -p system/board"
             print "\t$(CC) -c $(CFLAGS) $(OPT_SMALL) $(INC_DIRS) -o $@ $< -MMD -MP -MT $@ -MF $(@:.o=.d)"
             print ""
+        }
+        { print }
+    ' "$mk" > "$mk.new" && mv "$mk.new" "$mk"
+fi
+
+if ! grep -q "^system/board/imc/%.o:" "$mk"; then
+    echo "==> adding system/board/imc pattern rule"
+    awk '
+        /^system\/board\/%\.o: \.\.\/\.\.\/system\/board\/%\.c/ && !done {
+            done = 1
+            print $0
+            print ""
+            print "system/board/imc/%.o: ../../system/board/imc/%.c"
+            print "\t@mkdir -p system/board/imc"
+            print "\t$(CC) -c $(CFLAGS) $(OPT_SMALL) $(INC_DIRS) -o $@ $< -MMD -MP -MT $@ -MF $(@:.o=.d)"
+            print ""
+            next
         }
         { print }
     ' "$mk" > "$mk.new" && mv "$mk.new" "$mk"

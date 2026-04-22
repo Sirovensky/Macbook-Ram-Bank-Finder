@@ -19,7 +19,7 @@
 #include "display.h"
 
 #include "board_topology.h"
-#include "cfl_decode.h"
+#include "imc_dispatch.h"
 #include "badmem_log.h"
 
 extern int scroll_message_row;
@@ -46,8 +46,14 @@ void board_report_error(uint64_t addr, uint64_t xor_bits)
     // whether the full topology decode succeeds).
     badmem_log_record(addr);
 
-    struct pa_decoded pa = cfl_decode_pa(addr);
+    struct pa_decoded pa = imc_decode_pa(addr);
     if (!pa.valid) return;
+
+    // Track C: record bad row tuple for row-level NVRAM masking.
+    if (pa.bank_row_valid) {
+        badmem_log_record_row(pa.channel, pa.rank,
+                              pa.bank_group, pa.bank, pa.row);
+    }
 
     uint8_t lane_mask = 0;
     for (int bit = 0; bit < 64; bit++) {
@@ -55,7 +61,7 @@ void board_report_error(uint64_t addr, uint64_t xor_bits)
     }
     if (!lane_mask) return;
 
-    const struct mc_config *mc = cfl_mc_config();
+    const struct mc_config *mc = imc_config();
     const board_profile_t *p   = board_detect();
     uint8_t ranks = channel_ranks(mc, pa.channel);
 

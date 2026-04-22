@@ -46,6 +46,15 @@
 #define VARNAME_BADPAGES BRR_VARNAME_BADPAGES
 #define VARNAME_BADCHIPS BRR_VARNAME_BADCHIPS
 
+// Track C: NVRAM variable names for row-level masking (file-local, not in mask_ops.h).
+static const CHAR16 VARNAME_BADROWS[]       = L"BrrBadRows";
+static const CHAR16 VARNAME_DECODER_STATUS[]= L"BrrDecoderStatus";
+static const CHAR16 LEGACY_VARNAME_BADROWS[]= L"A1990BadRows";
+
+// Decoder status values (written as ASCII strings by decoder_selftest; read here).
+#define DECODER_STATUS_VALIDATED  "VALIDATED"
+#define DECODER_STATUS_FAILED     "FAILED"
+
 // Known APFS Preboot path to macOS boot.efi.
 static const CHAR16 MACOS_BOOT_PATH[] =
     L"\\System\\Library\\CoreServices\\boot.efi";
@@ -60,6 +69,8 @@ static EFI_STATUS mask_pages(EFI_SYSTEM_TABLE *st,
                               const badmem_range_t *ranges, unsigned count);
 static EFI_STATUS mask_chips(EFI_SYSTEM_TABLE *st,
                               badmem_chip_t *chips, unsigned chip_count);
+static EFI_STATUS mask_rows(EFI_SYSTEM_TABLE *st,
+                             badmem_row_t *rows, unsigned count);
 static EFI_STATUS resolve_chip_entries(EFI_SYSTEM_TABLE *st,
                                         badmem_chip_t *chips,
                                         unsigned chip_count);
@@ -73,6 +84,10 @@ static EFI_STATUS chainload_macos(EFI_SYSTEM_TABLE *st, EFI_HANDLE self,
 static void handle_nvram_state(EFI_SYSTEM_TABLE *st, EFI_HANDLE image,
                                 int *skip_mask, int *force_chip);
 static CHAR16 prompt_confirm(EFI_SYSTEM_TABLE *st, unsigned timeout_s);
+static unsigned read_nvram_badrows(EFI_SYSTEM_TABLE *st,
+                                    badmem_row_t *rows, unsigned cap);
+static int read_nvram_decoder_status_validated(EFI_SYSTEM_TABLE *st);
+static int read_nvram_decoder_status_failed(EFI_SYSTEM_TABLE *st);
 
 // ---------------------------------------------------------------------------
 // Helpers: thin wrappers around shared mask_ops functions.
@@ -344,29 +359,60 @@ static EFI_STATUS read_badmem(EFI_SYSTEM_TABLE *st, EFI_HANDLE image_handle,
 // Reserve bad pages.
 // ---------------------------------------------------------------------------
 
+// Safety margin added around every detected bad range.  Bad DRAM cells
+// often indicate adjacent-cell degradation about to manifest — match the
+// approach documented by Derrick Schneider for his A1990 repair:
+// expand each reported range by 1 MiB on each side, aligned to 4 KiB.
+// Yields ~2 MiB reserved per detected range minimum.  If multiple ranges
+// are close together, AllocatePages handles overlap by skipping already-
+// reserved pages (counted separately).
+#define MASK_EXPAND_BYTES   (1ULL * 1024 * 1024)
+#define MASK_PAGE_SIZE      4096ULL
+
 static EFI_STATUS mask_pages(EFI_SYSTEM_TABLE *st,
                               const badmem_range_t *ranges, unsigned count)
 {
-    unsigned ok = 0, skip = 0;
+    unsigned ranges_ok = 0;
+    UINT64   pages_ok  = 0;
+    UINT64   pages_skip = 0;
+
     for (unsigned i = 0; i < count; i++) {
-        EFI_PHYSICAL_ADDRESS addr = (EFI_PHYSICAL_ADDRESS)ranges[i].start;
-        UINTN pages = (UINTN)(ranges[i].len / 4096);
-        EFI_STATUS s = st->BootServices->AllocatePages(
-            AllocateAddress, EfiReservedMemoryType, pages, &addr);
-        if (s == EFI_SUCCESS) {
-            ok++;
-        } else {
-            // Already reserved or firmware owns it — harmless.
-            skip++;
+        UINT64 orig_start = ranges[i].start;
+        UINT64 orig_end   = orig_start + ranges[i].len;
+
+        // Expand +/- 1 MiB, align to 4 KiB page.
+        UINT64 exp_start = (orig_start > MASK_EXPAND_BYTES)
+                            ? (orig_start - MASK_EXPAND_BYTES) : 0;
+        UINT64 exp_end   = orig_end + MASK_EXPAND_BYTES;
+        exp_start &= ~(MASK_PAGE_SIZE - 1);
+        exp_end    = (exp_end + MASK_PAGE_SIZE - 1) & ~(MASK_PAGE_SIZE - 1);
+
+        // Reserve page-by-page so pre-reserved overlaps don't kill whole run.
+        unsigned page_ok_this = 0;
+        for (UINT64 pa = exp_start; pa < exp_end; pa += MASK_PAGE_SIZE) {
+            EFI_PHYSICAL_ADDRESS addr = (EFI_PHYSICAL_ADDRESS)pa;
+            EFI_STATUS s = st->BootServices->AllocatePages(
+                AllocateAddress, EfiReservedMemoryType, 1, &addr);
+            if (s == EFI_SUCCESS) {
+                pages_ok++;
+                page_ok_this++;
+            } else {
+                // Already reserved / firmware-owned / out-of-range — skip.
+                pages_skip++;
+            }
         }
+        if (page_ok_this > 0) ranges_ok++;
     }
+
     efi_print(st, L"[shim] masked ");
-    efi_print_dec(st, (UINTN)ok);
+    efi_print_dec(st, (UINTN)ranges_ok);
     efi_print(st, L"/");
     efi_print_dec(st, (UINTN)count);
-    efi_print(st, L" range(s) (");
-    efi_print_dec(st, (UINTN)skip);
-    efi_print(st, L" already reserved)\r\n");
+    efi_print(st, L" range(s), ");
+    efi_print_dec(st, (UINTN)pages_ok);
+    efi_print(st, L" pages reserved (+/-1 MiB), ");
+    efi_print_dec(st, (UINTN)pages_skip);
+    efi_print(st, L" pre-reserved\r\n");
     return EFI_SUCCESS;
 }
 
@@ -500,6 +546,122 @@ static EFI_STATUS mask_chips(EFI_SYSTEM_TABLE *st,
     efi_print(st, L"\r\n");
 
     return EFI_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// Row-level masking (Track C).
+// ---------------------------------------------------------------------------
+
+// Per-row PA enumeration cap: ~2 pages per row for a 16 KB row (4 chips * 4096).
+// Use 2048 to bound scan time — at 4 KiB steps over 32 GiB that's 8M iterations.
+// In practice a single DRAM row produces ~2 PAs in the physical map.
+#define ROW_ENUM_CAP  2048
+
+static EFI_STATUS mask_rows(EFI_SYSTEM_TABLE *st,
+                             badmem_row_t *rows, unsigned count)
+{
+    if (count == 0) return EFI_SUCCESS;
+
+    if (!shim_cfl_init()) {
+        efi_print(st, L"[mask] row mode: IMC not accessible (not Coffee Lake?)\r\n");
+        return EFI_UNSUPPORTED;
+    }
+
+    uint64_t total = shim_cfl_total_memory();
+    if (total == 0) {
+        efi_print(st, L"[mask] row mode: zero memory reported by IMC\r\n");
+        return EFI_UNSUPPORTED;
+    }
+
+    efi_print(st, L"[mask] row mode: enumerating PAs for ");
+    efi_print_dec(st, (UINTN)count);
+    efi_print(st, L" bad row(s)...\r\n");
+
+    // Static PA buffer — shared across all rows.
+    static uint64_t pa_buf[ROW_ENUM_CAP];
+
+    unsigned total_reserved = 0;
+    unsigned total_skipped  = 0;
+
+    for (unsigned i = 0; i < count; i++) {
+        unsigned n_pas = shim_cfl_enumerate_row(
+            rows[i].channel, rows[i].rank,
+            rows[i].bank_group, rows[i].bank, rows[i].row,
+            pa_buf, ROW_ENUM_CAP);
+
+        for (unsigned j = 0; j < n_pas; j++) {
+            EFI_PHYSICAL_ADDRESS addr = (EFI_PHYSICAL_ADDRESS)pa_buf[j];
+            EFI_STATUS s = st->BootServices->AllocatePages(
+                AllocateAddress, EfiReservedMemoryType, 1, &addr);
+            if (s == EFI_SUCCESS)
+                total_reserved++;
+            else
+                total_skipped++;
+        }
+    }
+
+    efi_print(st, L"[shim] Row-mode mask active (");
+    efi_print_dec(st, (UINTN)count);
+    efi_print(st, L" rows, ~");
+    efi_print_dec(st, (UINTN)total_reserved);
+    efi_print(st, L" pages reserved, ");
+    efi_print_dec(st, (UINTN)total_skipped);
+    efi_print(st, L" pre-reserved)\r\n");
+
+    return EFI_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// Read BrrBadRows NVRAM variable (with legacy A1990BadRows fallback).
+// Returns number of row tuples parsed.
+// ---------------------------------------------------------------------------
+static unsigned read_nvram_badrows(EFI_SYSTEM_TABLE *st,
+                                    badmem_row_t *rows, unsigned cap)
+{
+    // Header (8 bytes) + 256 tuples * 8 bytes = 2056 bytes max.
+    static UINT8 blob[8 + BADMEM_MAX_ROWS * 8];
+    UINTN blob_sz = sizeof(blob);
+    UINT32 attrs  = 0;
+
+    EFI_STATUS s = st->RuntimeServices->GetVariable(
+        (CHAR16 *)VARNAME_BADROWS, (EFI_GUID *)&BRR_GUID,
+        &attrs, &blob_sz, blob);
+
+    if (s != EFI_SUCCESS) {
+        // Fallback: try legacy A1990BadRows name.
+        blob_sz = sizeof(blob);
+        attrs   = 0;
+        s = st->RuntimeServices->GetVariable(
+            (CHAR16 *)LEGACY_VARNAME_BADROWS, (EFI_GUID *)&BRR_GUID,
+            &attrs, &blob_sz, blob);
+    }
+
+    if (s != EFI_SUCCESS) return 0;
+
+    return badmem_parse_rows_blob(blob, (unsigned)blob_sz, rows, cap);
+}
+
+// ---------------------------------------------------------------------------
+// Read BrrDecoderStatus NVRAM variable.
+// Returns 1 if status == "VALIDATED", 0 otherwise.
+// ---------------------------------------------------------------------------
+static int read_nvram_decoder_status_validated(EFI_SYSTEM_TABLE *st)
+{
+    char buf[32] = {0};
+    EFI_STATUS s = mask_nvram_get_ascii(st, VARNAME_DECODER_STATUS,
+                                         buf, sizeof(buf));
+    if (s != EFI_SUCCESS) return 0;
+    return ascii_eq(buf, DECODER_STATUS_VALIDATED);
+}
+
+// Returns 1 if status == "FAILED", 0 otherwise.
+static int read_nvram_decoder_status_failed(EFI_SYSTEM_TABLE *st)
+{
+    char buf[32] = {0};
+    EFI_STATUS s = mask_nvram_get_ascii(st, VARNAME_DECODER_STATUS,
+                                         buf, sizeof(buf));
+    if (s != EFI_SUCCESS) return 0;
+    return ascii_eq(buf, DECODER_STATUS_FAILED);
 }
 
 // ---------------------------------------------------------------------------
@@ -846,61 +1008,122 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     if (!force_no_mask)
         handle_nvram_state(st, image, &skip_mask, &force_chip);
 
-    // 2. Read badmem.txt and mask pages/chips (unless user pressed N).
+    // 2. Read bad-memory data and apply mask (unless user pressed N).
     static badmem_range_t ranges[BADMEM_MAX_RANGES];
     static badmem_chip_t  chips[BADMEM_MAX_CHIPS];
-    unsigned n_ranges = 0, n_chips = 0;
+    static badmem_row_t   rows[BADMEM_MAX_ROWS];
+    unsigned n_ranges = 0, n_chips = 0, n_rows = 0;
 
     if (!skip_mask) {
-        // In force_chip mode (TRIAL_PENDING_CHIP): load chip designators from
-        // BrrBadChips NVRAM and do NOT use page ranges from badmem.txt.
-        if (force_chip) {
-            n_chips = read_nvram_badchips(st, chips, BADMEM_MAX_CHIPS);
-            efi_print(st, L"[shim] chip mode: loaded ");
-            efi_print_dec(st, (UINTN)n_chips);
-            efi_print(st, L" chip designator(s) from NVRAM\r\n");
-        } else {
-            EFI_STATUS s = read_badmem(st, image, ranges, &n_ranges,
-                                       chips, &n_chips);
-            if (s != EFI_SUCCESS) {
-                efi_print(st, L"[shim] warning: could not read badmem.txt\r\n");
+        // -----------------------------------------------------------------------
+        // Track C decision tree:
+        //
+        //   decoder_status == VALIDATED && BrrBadRows present
+        //       -> row-mode: enumerate and reserve per-row PAs (~8 KiB per row)
+        //
+        //   decoder_status == FAILED
+        //       -> warn user; fall back to chip-mode from BrrBadChips
+        //
+        //   chip mode (force_chip from TRIAL_PENDING_CHIP, or fallback):
+        //       -> full-channel mask from BrrBadChips
+        //
+        //   else:
+        //       -> page-mode from BrrBadPages + badmem.txt
+        // -----------------------------------------------------------------------
+
+        int decoder_validated = read_nvram_decoder_status_validated(st);
+        int decoder_failed    = read_nvram_decoder_status_failed(st);
+
+        n_rows = read_nvram_badrows(st, rows, BADMEM_MAX_ROWS);
+
+        if (decoder_validated && n_rows > 0) {
+            // ------------------------------------------------------------------
+            // ROW MODE: fine-grained masking — ~2 pages per bad row.
+            // ------------------------------------------------------------------
+            efi_print(st, L"[shim] decoder=VALIDATED, ");
+            efi_print_dec(st, (UINTN)n_rows);
+            efi_print(st, L" bad row(s) in NVRAM -> row-mode mask\r\n");
+            mask_rows(st, rows, n_rows);
+
+        } else if (decoder_failed || (force_chip && !decoder_validated)) {
+            // ------------------------------------------------------------------
+            // CHIP MODE: decoder failed (or chip trial) — coarse-grained mask.
+            // Print warning banner when decoder explicitly FAILED.
+            // ------------------------------------------------------------------
+            if (decoder_failed) {
+                efi_print(st, L"\r\n");
+                efi_print(st, L"  *** WARNING: Decoder validation FAILED ***\r\n");
+                efi_print(st, L"  Using full-channel chip mask (coarse-grained).\r\n");
+                efi_print(st, L"  This masks ~16 GiB per bad chip instead of ~8 KiB.\r\n");
+                efi_print(st, L"  To recover row-mode: run memtest again with an\r\n");
+                efi_print(st, L"  updated decoder (DRAMA-style learning TBD).\r\n");
+                efi_print(st, L"\r\n");
             }
 
-            // Merge NVRAM bad pages (written by memtest's badmem_log_flush_nvram).
-            // NVRAM entries that duplicate file entries are silently skipped.
-            unsigned nvram_added = read_nvram_badpages(st, ranges, n_ranges,
-                                                       BADMEM_MAX_RANGES);
-            if (nvram_added > 0 || n_ranges > 0) {
-                efi_print(st, L"[mask] loaded ");
-                efi_print_dec(st, (UINTN)nvram_added);
-                efi_print(st, L" page(s) from NVRAM, ");
-                efi_print_dec(st, (UINTN)n_ranges);
-                efi_print(st, L" range(s) from badmem.txt\r\n");
+            if (force_chip) {
+                n_chips = read_nvram_badchips(st, chips, BADMEM_MAX_CHIPS);
+                efi_print(st, L"[shim] chip mode: loaded ");
+                efi_print_dec(st, (UINTN)n_chips);
+                efi_print(st, L" chip designator(s) from NVRAM\r\n");
+            } else {
+                // force_chip == 0 but decoder_failed: load chips from NVRAM anyway.
+                n_chips = read_nvram_badchips(st, chips, BADMEM_MAX_CHIPS);
+                if (n_chips == 0) {
+                    // No BrrBadChips: fall through to page-mode below.
+                    goto page_mode;
+                }
+                efi_print(st, L"[shim] chip fallback: loaded ");
+                efi_print_dec(st, (UINTN)n_chips);
+                efi_print(st, L" chip designator(s) from NVRAM\r\n");
             }
-            n_ranges += nvram_added;
-        }
 
-        unsigned region_ok = 0, chip_ok = 0;
-
-        if (n_ranges > 0) {
-            efi_print(st, L"[shim] ");
-            efi_print_dec(st, (UINTN)n_ranges);
-            efi_print(st, L" region range(s) to reserve\r\n");
-            mask_pages(st, ranges, n_ranges);
-            region_ok = n_ranges;
-        }
-
-        if (n_chips > 0) {
-            efi_print(st, L"[shim] ");
-            efi_print_dec(st, (UINTN)n_chips);
-            efi_print(st, L" chip directive(s) found\r\n");
             resolve_chip_entries(st, chips, n_chips);
             mask_chips(st, chips, n_chips);
-            chip_ok = n_chips;
-        }
 
-        if (region_ok == 0 && chip_ok == 0) {
-            efi_print(st, L"[shim] no bad pages listed; proceeding without mask\r\n");
+        } else {
+page_mode:
+            // ------------------------------------------------------------------
+            // PAGE MODE: existing behaviour — BrrBadPages + badmem.txt.
+            // Also used as fallback when decoder status is UNKNOWN/absent.
+            // ------------------------------------------------------------------
+            if (!force_chip) {
+                EFI_STATUS rs = read_badmem(st, image, ranges, &n_ranges,
+                                            chips, &n_chips);
+                if (rs != EFI_SUCCESS) {
+                    efi_print(st, L"[shim] warning: could not read badmem.txt\r\n");
+                }
+
+                // Merge NVRAM bad pages.
+                unsigned nvram_added = read_nvram_badpages(st, ranges, n_ranges,
+                                                           BADMEM_MAX_RANGES);
+                if (nvram_added > 0 || n_ranges > 0) {
+                    efi_print(st, L"[mask] loaded ");
+                    efi_print_dec(st, (UINTN)nvram_added);
+                    efi_print(st, L" page(s) from NVRAM, ");
+                    efi_print_dec(st, (UINTN)n_ranges);
+                    efi_print(st, L" range(s) from badmem.txt\r\n");
+                }
+                n_ranges += nvram_added;
+            }
+
+            if (n_ranges > 0) {
+                efi_print(st, L"[shim] ");
+                efi_print_dec(st, (UINTN)n_ranges);
+                efi_print(st, L" region range(s) to reserve\r\n");
+                mask_pages(st, ranges, n_ranges);
+            }
+
+            if (n_chips > 0) {
+                efi_print(st, L"[shim] ");
+                efi_print_dec(st, (UINTN)n_chips);
+                efi_print(st, L" chip directive(s) found\r\n");
+                resolve_chip_entries(st, chips, n_chips);
+                mask_chips(st, chips, n_chips);
+            }
+
+            if (n_ranges == 0 && n_chips == 0) {
+                efi_print(st, L"[shim] No bad-memory data found.  Chain-loading macOS unmasked.\r\n");
+            }
         }
     }
 

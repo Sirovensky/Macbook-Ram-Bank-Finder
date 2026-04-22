@@ -85,8 +85,13 @@ EFI_STATUS mask_nvram_get_ascii(EFI_SYSTEM_TABLE *st, const CHAR16 *name,
 
 void mask_nvram_delete(EFI_SYSTEM_TABLE *st, const CHAR16 *name)
 {
+    // Apple firmware rejects Attributes=0; pass NV|BS|RT to match the
+    // variable's stored attributes so the delete succeeds on T2.
     st->RuntimeServices->SetVariable(
-        (CHAR16 *)name, (EFI_GUID *)&BRR_GUID, 0, 0, NULL);
+        (CHAR16 *)name, (EFI_GUID *)&BRR_GUID,
+        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+            EFI_VARIABLE_RUNTIME_ACCESS,
+        0, NULL);
 }
 
 static EFI_STATUS nvram_set_raw(EFI_SYSTEM_TABLE *st, const CHAR16 *name,
@@ -110,8 +115,12 @@ static EFI_STATUS nvram_get_raw(EFI_SYSTEM_TABLE *st, const CHAR16 *name,
 
 static void nvram_del_global(EFI_SYSTEM_TABLE *st, const CHAR16 *name)
 {
+    // NV|BS|RT required by Apple T2 firmware for variable deletion.
     st->RuntimeServices->SetVariable(
-        (CHAR16 *)name, (EFI_GUID *)&EFI_GLOBAL_GUID, 0, 0, NULL);
+        (CHAR16 *)name, (EFI_GUID *)&EFI_GLOBAL_GUID,
+        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+            EFI_VARIABLE_RUNTIME_ACCESS,
+        0, NULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +272,9 @@ static void save_existing_boot_entries(EFI_SYSTEM_TABLE *st)
     unsigned count = 0;
 
     // GetNextVariableName iteration: start with empty name + zeroed GUID.
-    static CHAR16 var_name[128];
+    // UEFI spec allows names up to 512 bytes (256 CHAR16); use 256 to avoid
+    // EFI_BUFFER_TOO_SMALL causing early termination of the enumeration.
+    static CHAR16 var_name[256];
     EFI_GUID var_guid;
 
     // Zero out starting state.
@@ -595,6 +606,8 @@ EFI_STATUS install_mask_full(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st,
     s = copy_file_ops(st, usb_root, USB_SHIM_PATH, esp_root, INTERNAL_SHIM_PATH);
     if (s != EFI_SUCCESS) {
         delete_file_ops(esp_root, INTERNAL_SHIM_PATH);
+        mask_nvram_delete(st, BRR_VARNAME_ORIGBOOT);
+        mask_nvram_delete(st, BRR_VARNAME_BOOTENTRIES);
         esp_root->Close(esp_root);
         usb_root->Close(usb_root);
         if (err_msg) *err_msg = "failed to copy mask-shim.efi";
@@ -617,6 +630,8 @@ EFI_STATUS install_mask_full(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st,
     if (s != EFI_SUCCESS) {
         delete_file_ops(esp_root, INTERNAL_SHIM_PATH);
         delete_file_ops(esp_root, INTERNAL_BADMEM);
+        mask_nvram_delete(st, BRR_VARNAME_ORIGBOOT);
+        mask_nvram_delete(st, BRR_VARNAME_BOOTENTRIES);
         esp_root->Close(esp_root);
         if (err_msg) *err_msg = "could not create BootNNNN variable";
         return s;
@@ -642,6 +657,8 @@ EFI_STATUS install_mask_full(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st,
             nvram_del_global(st, bvn);
         }
         mask_nvram_delete(st, BRR_VARNAME_BOOTSLOT);
+        mask_nvram_delete(st, BRR_VARNAME_ORIGBOOT);
+        mask_nvram_delete(st, BRR_VARNAME_BOOTENTRIES);
         delete_file_ops(esp_root, INTERNAL_SHIM_PATH);
         delete_file_ops(esp_root, INTERNAL_BADMEM);
         esp_root->Close(esp_root);
@@ -736,9 +753,12 @@ EFI_STATUS uninstall_mask_full(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st,
             varname[4]=hex[0]; varname[5]=hex[1]; varname[6]=hex[2];
             varname[7]=hex[3]; varname[8]=0;
 
-            // Delete by SetVariable with DataSize=0.
+            // Delete by SetVariable with DataSize=0; NV|BS|RT required by T2.
             st->RuntimeServices->SetVariable(
-                varname, (EFI_GUID *)&EFI_GLOBAL_GUID, 0, 0, NULL);
+                varname, (EFI_GUID *)&EFI_GLOBAL_GUID,
+                EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                    EFI_VARIABLE_RUNTIME_ACCESS,
+                0, NULL);
 
             efi_print(st, L"  deleted: Boot");
             efi_print(st, hex);
@@ -831,12 +851,19 @@ EFI_STATUS uninstall_mask_full(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st,
         BRR_VARNAME_BOOTSLOT,
         // Also purge the probe var in case it was left behind.
         L"BrrMaskProbe",
+        // Phase A additions: row-mode + decoder self-test status.
+        L"BrrBadRows",
+        L"BrrDecoderStatus",
+        L"A1990BadRows",   // legacy fallback (unlikely but future-proof)
     };
     static const unsigned n_known = sizeof(known_vars)/sizeof(known_vars[0]);
 
     for (unsigned i = 0; i < n_known; i++) {
         EFI_STATUS sd = st->RuntimeServices->SetVariable(
-            (CHAR16 *)known_vars[i], (EFI_GUID *)&BRR_GUID, 0, 0, NULL);
+            (CHAR16 *)known_vars[i], (EFI_GUID *)&BRR_GUID,
+            EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                EFI_VARIABLE_RUNTIME_ACCESS,
+            0, NULL);
         if (sd == EFI_SUCCESS) {
             efi_print(st, L"  deleted NVRAM: ");
             efi_print(st, known_vars[i]);
@@ -849,7 +876,8 @@ EFI_STATUS uninstall_mask_full(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st,
     // Sweep via GetNextVariableName to catch any other BRR vars
     // (e.g. from future additions or partial installs).
     {
-        static CHAR16 sweep_name[128];
+        // 256 CHAR16 = 512 bytes; matches UEFI spec max variable name length.
+        static CHAR16 sweep_name[256];
         EFI_GUID sweep_guid;
         sweep_name[0] = 0;
         {
@@ -873,9 +901,13 @@ EFI_STATUS uninstall_mask_full(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st,
             }
             if (!is_ours) continue;
 
-            // Delete this variable.
+            // Delete this variable.  Use NV|BS|RT so Apple T2 firmware
+            // accepts the delete (rejects Attributes=0).
             EFI_STATUS sd = st->RuntimeServices->SetVariable(
-                sweep_name, &sweep_guid, 0, 0, NULL);
+                sweep_name, &sweep_guid,
+                EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                    EFI_VARIABLE_RUNTIME_ACCESS,
+                0, NULL);
             if (sd == EFI_SUCCESS) {
                 efi_print(st, L"  deleted NVRAM (sweep): ");
                 efi_print(st, sweep_name);

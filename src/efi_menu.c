@@ -33,6 +33,7 @@
 #include "efi.h"
 
 #include "efi_menu.h"
+#include "decoder_selftest.h"
 
 // ---------------------------------------------------------------------------
 // efi_boot_services_t in efi.h declares stall as `void *` (since the caller
@@ -87,6 +88,12 @@ static const efi_char16_t LEGACY_VARNAME_STATE[] = {
 static const efi_guid_t LOADED_IMAGE_GUID = {
     0x5b1b31a1, 0x9562, 0x11d2,
     { 0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
+};
+
+// EFI Device-Path protocol GUID.
+static const efi_guid_t DEVICE_PATH_GUID = {
+    0x09576e91, 0x6d3f, 0x11d2,
+    { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
 };
 
 // LoadImage / StartImage fn-pointer types (fields are `void *` in efi.h).
@@ -263,49 +270,93 @@ static unsigned read_state(char *out, unsigned cap)
 // Returns 0 on success dispatch (never returns if binary runs ok), or
 // non-zero EFI_STATUS on failure.
 // ---------------------------------------------------------------------------
+// Return total byte length of a device path including its End node.
+static uintn_t dp_total_len_menu(const uint8_t *dp)
+{
+    uintn_t total = 0;
+    for (;;) {
+        uint16_t node_len = (uint16_t)dp[2] | ((uint16_t)dp[3] << 8);
+        total += node_len;
+        if (dp[0] == 0x7f && dp[1] == 0xff) break;
+        dp += node_len;
+    }
+    return total;
+}
+
 static efi_status_t chainload(efi_handle_t image_handle,
                                const efi_char16_t *path,
                                unsigned path_chars)  // includes trailing NUL
 {
     if (!g_bs || !image_handle) return 0x8000000000000002ULL; // EFI_INVALID_PARAMETER
 
-    // 1. Get Loaded-Image protocol on our image.
+    // 1. Get Loaded-Image protocol on our image to find the source device.
     efi_loaded_image_t *li = 0;
     efi_status_t s = g_bs->handle_protocol(
         image_handle, (efi_guid_t *)&LOADED_IMAGE_GUID, (void **)&li);
     if (s != EFI_SUCCESS || !li) return s;
 
-    // 2. Build a MediaFilePath node + End-of-Path.
-    //    MediaFilePath: type=4 (MEDIA_DEVICE_PATH), sub=4 (FILE_PATH).
-    //    End: type=0x7F, sub=0xFF, length=4.
-    unsigned path_bytes = path_chars * 2;
+    // 2. Get the hardware device path of our device so we can prefix it.
+    //    This is the pattern from mask-shim/main.c::build_file_device_path():
+    //    copy all hardware nodes (strip trailing End), append MediaFilePath,
+    //    append End.  On T2, a bare FilePath node without the hardware prefix
+    //    causes LoadImage to fail silently.
+    uint8_t *hw_dp = 0;
+    uintn_t prefix_len = 0;
+    if (li->device_handle) {
+        s = g_bs->handle_protocol(
+            li->device_handle, (efi_guid_t *)&DEVICE_PATH_GUID,
+            (void **)&hw_dp);
+        if (s == EFI_SUCCESS && hw_dp) {
+            uintn_t total = dp_total_len_menu(hw_dp);
+            prefix_len = (total >= 4) ? (total - 4) : 0; // strip End node
+        } else {
+            hw_dp = 0;
+        }
+    }
 
-    // Max path: ~64 chars * 2 = 128 + 4 hdr + 4 end = 136. Use 160 for safety.
-    static uint8_t dp_buf[160];
-    efi_dp_hdr_t *h = (efi_dp_hdr_t *)dp_buf;
-    h->type = 0x04;           // MEDIA_DEVICE_PATH
-    h->sub_type = 0x04;       // FILEPATH
-    h->length = (uint16_t)(sizeof(*h) + path_bytes);
+    // 3. Build:  [hardware prefix] + MediaFilePath(path) + End
+    //    path_chars includes the trailing NUL, so path_bytes covers the NUL too.
+    unsigned path_bytes = path_chars * sizeof(efi_char16_t);
+    uintn_t fp_sz    = 4 + path_bytes;          // FilePath node
+    uintn_t end_sz   = 4;                        // End node
+    uintn_t total_sz = prefix_len + fp_sz + end_sz;
+
+    // dp_buf must hold the full path.  512 bytes is safe for any real-world
+    // combination of hardware prefix + file path on this machine.
+    static uint8_t dp_buf[512];
+    _Static_assert(sizeof(dp_buf) >= 512,
+                   "dp_buf too small for hardware prefix + file path + end node");
+    if (total_sz > sizeof(dp_buf)) return 0x8000000000000002ULL; // EFI_INVALID_PARAMETER
+
+    uint8_t *p = dp_buf;
+    // Copy hardware prefix (no End node).
+    if (prefix_len > 0) {
+        for (uintn_t i = 0; i < prefix_len; i++) p[i] = hw_dp[i];
+        p += prefix_len;
+    }
+    // MediaFilePath (Type=4, SubType=4).
+    p[0] = 0x04; p[1] = 0x04;
+    p[2] = (uint8_t)(fp_sz & 0xff);
+    p[3] = (uint8_t)(fp_sz >> 8);
     for (unsigned i = 0; i < path_chars; i++) {
         efi_char16_t c = path[i];
-        dp_buf[sizeof(*h) + i * 2]     = (uint8_t)(c & 0xFF);
-        dp_buf[sizeof(*h) + i * 2 + 1] = (uint8_t)((c >> 8) & 0xFF);
+        p[4 + i * 2]     = (uint8_t)(c & 0xFF);
+        p[4 + i * 2 + 1] = (uint8_t)((c >> 8) & 0xFF);
     }
-    efi_dp_hdr_t *e = (efi_dp_hdr_t *)(dp_buf + h->length);
-    e->type = 0x7F;           // END_DEVICE_PATH
-    e->sub_type = 0xFF;
-    e->length = 4;
+    p += fp_sz;
+    // End-of-Entire-Device-Path node.
+    p[0] = 0x7f; p[1] = 0xff; p[2] = 4; p[3] = 0;
 
-    // 3. LoadImage with BootPolicy=TRUE lets firmware search on the parent device.
+    // 4. LoadImage with BootPolicy=FALSE and the full device path.
     load_image_fn load_img = (load_image_fn)(uintptr_t)g_bs->load_image;
     start_image_fn start_img = (start_image_fn)(uintptr_t)g_bs->start_image;
     if (!load_img || !start_img) return 0x8000000000000002ULL;
 
     efi_handle_t new_image = 0;
-    s = load_img(1, image_handle, dp_buf, 0, 0, &new_image);
+    s = load_img(0, image_handle, dp_buf, 0, 0, &new_image);
     if (s != EFI_SUCCESS) return s;
 
-    // 4. StartImage — binary reboots on success, so this should not return.
+    // 5. StartImage — binary reboots on success, so this should not return.
     return start_img(new_image, 0, 0);
 }
 
@@ -449,6 +500,24 @@ uint32_t efi_menu(void *sys_table_arg, void *image_handle_arg)
     if (!g_con_out || !g_con_in || !g_bs) return 0;
 
     // ---------------------------------------------------------------------------
+    // Track B: Decoder self-test.
+    // Run only when there is no existing BrrMaskState NVRAM entry — i.e. on
+    // the first user-facing menu (state == NONE).  For TRIAL_PENDING_* and
+    // TRIAL_BOOTED states we skip: the result from the NONE run is already
+    // persisted in the BrrDecoderStatus NVRAM variable and re-running during
+    // an automated chainload cycle wastes time and could confuse the state
+    // machine.
+    // ---------------------------------------------------------------------------
+    {
+        char state_probe[64] = {0};
+        unsigned probe_sz = read_state(state_probe, sizeof(state_probe) - 1);
+        if (probe_sz == 0) {
+            // No existing state — this is a fresh NONE boot; run the self-test.
+            decoder_selftest_run(st);
+        }
+    }
+
+    // ---------------------------------------------------------------------------
     // Phase B: check if NVRAM has a pending trial state — if so, chainload
     // mask-shim.efi (TRIAL_PENDING_*) or run the permanent-install prompt
     // (TRIAL_BOOTED, may chainload install.efi and never return).
@@ -512,11 +581,10 @@ uint32_t efi_menu(void *sys_table_arg, void *image_handle_arg)
             // 'r' / 'R' -- reboot
             if (ch == 'r' || ch == 'R') {
                 con_puts("\r\n  -> Rebooting...\r\n");
-                // Match 3-arg typedef in memtest86plus/boot/efi.h (upstream).
-                // UEFI spec is 4-arg (DataSize + ResetData) but memtest's own
-                // hwctrl.c also uses 3-arg across platforms without issue --
-                // firmware only reads ResetData when DataSize > 0.
-                g_rs->reset_system(EFI_RESET_COLD, 0, 0);
+                // Using 4-arg UEFI spec signature.
+                typedef void (efiapi *reset_fn)(int, efi_status_t, uintn_t, void *);
+                reset_fn do_reset = (reset_fn)(uintptr_t)g_rs->reset_system;
+                do_reset(EFI_RESET_COLD, 0, 0, (void *)0);
                 // Should not return; spin if firmware is broken.
                 while (1) {
 #if defined(__x86_64__) || defined(__i386__)

@@ -205,3 +205,61 @@ unsigned badmem_parse(const char *buf, uint64_t file_len,
                       chip_scratch, BADMEM_MAX_CHIPS, &result);
     return result.n_ranges;
 }
+
+// ---------------------------------------------------------------------------
+// BrrBadRows binary blob parser (Track C).
+// Binary layout (little-endian, packed):
+//   uint32_t version  = 1
+//   uint32_t count    = number of tuples
+//   tuple[count]:
+//     uint8_t  ch
+//     uint8_t  rank
+//     uint8_t  bg
+//     uint8_t  bank
+//     uint32_t row
+//   = 8 bytes per tuple.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    uint32_t version;
+    uint32_t count;
+} badrows_hdr_t;
+
+typedef struct {
+    uint8_t  ch;
+    uint8_t  rank;
+    uint8_t  bg;
+    uint8_t  bank;
+    uint32_t row;
+} badrows_tuple_t;
+
+unsigned badmem_parse_rows_blob(const void *blob, unsigned blob_sz,
+                                badmem_row_t *out, unsigned out_max)
+{
+    if (!blob || blob_sz < sizeof(badrows_hdr_t) || !out || out_max == 0)
+        return 0;
+
+    const badrows_hdr_t *hdr = (const badrows_hdr_t *)blob;
+    if (hdr->version != 1) return 0;
+
+    uint32_t count = hdr->count;
+    if (count == 0) return 0;
+    if (count > BADMEM_MAX_ROWS) count = BADMEM_MAX_ROWS;
+
+    unsigned expected = (unsigned)sizeof(badrows_hdr_t)
+                      + count * (unsigned)sizeof(badrows_tuple_t);
+    if (blob_sz < expected) return 0;
+
+    const badrows_tuple_t *tuples =
+        (const badrows_tuple_t *)((const uint8_t *)blob + sizeof(badrows_hdr_t));
+
+    unsigned n = (count < out_max) ? count : out_max;
+    for (unsigned i = 0; i < n; i++) {
+        out[i].channel    = tuples[i].ch;
+        out[i].rank       = tuples[i].rank;
+        out[i].bank_group = tuples[i].bg;
+        out[i].bank       = tuples[i].bank;
+        out[i].row        = tuples[i].row;
+    }
+    return n;
+}

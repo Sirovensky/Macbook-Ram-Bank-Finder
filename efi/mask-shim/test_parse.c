@@ -309,6 +309,109 @@ static void test_chip_compat_old_api(void)
 }
 
 // ---------------------------------------------------------------------------
+// BrrBadRows binary blob tests (Track C)
+// ---------------------------------------------------------------------------
+
+// Build a minimal BrrBadRows blob in the caller-supplied buffer.
+// Layout:
+//   uint32_t version = 1
+//   uint32_t count
+//   [count * { uint8 ch, uint8 rank, uint8 bg, uint8 bank, uint32 row }]
+static unsigned build_badrows_blob(uint8_t *buf, unsigned bufsz,
+                                    uint8_t ch, uint8_t rank,
+                                    uint8_t bg, uint8_t bank, uint32_t row)
+{
+    uint32_t version = 1, count = 1;
+    if (bufsz < 16) return 0;
+    // version (4 bytes LE)
+    buf[0] = (version >>  0) & 0xff; buf[1] = (version >>  8) & 0xff;
+    buf[2] = (version >> 16) & 0xff; buf[3] = (version >> 24) & 0xff;
+    // count
+    buf[4] = (count >>  0) & 0xff; buf[5] = (count >>  8) & 0xff;
+    buf[6] = (count >> 16) & 0xff; buf[7] = (count >> 24) & 0xff;
+    // tuple
+    buf[8]  = ch;
+    buf[9]  = rank;
+    buf[10] = bg;
+    buf[11] = bank;
+    buf[12] = (row >>  0) & 0xff; buf[13] = (row >>  8) & 0xff;
+    buf[14] = (row >> 16) & 0xff; buf[15] = (row >> 24) & 0xff;
+    return 16;
+}
+
+static void test_rows_blob_single(void)
+{
+    printf("test: badmem_parse_rows_blob single entry\n");
+    uint8_t blob[16];
+    unsigned sz = build_badrows_blob(blob, sizeof(blob), 1, 0, 2, 3, 0xABCDU);
+
+    badmem_row_t out[8];
+    unsigned n = badmem_parse_rows_blob(blob, sz, out, 8);
+    ASSERT_EQ(n, 1);
+    if (n >= 1) {
+        ASSERT_EQ(out[0].channel,    1);
+        ASSERT_EQ(out[0].rank,       0);
+        ASSERT_EQ(out[0].bank_group, 2);
+        ASSERT_EQ(out[0].bank,       3);
+        ASSERT_EQ(out[0].row,        0xABCDU);
+    }
+}
+
+static void test_rows_blob_bad_version(void)
+{
+    printf("test: badmem_parse_rows_blob bad version rejected\n");
+    uint8_t blob[16];
+    build_badrows_blob(blob, sizeof(blob), 0, 0, 0, 0, 0);
+    blob[0] = 2;  // version = 2, not supported
+
+    badmem_row_t out[8];
+    unsigned n = badmem_parse_rows_blob(blob, 16, out, 8);
+    ASSERT_EQ(n, 0);
+}
+
+static void test_rows_blob_truncated(void)
+{
+    printf("test: badmem_parse_rows_blob truncated blob returns 0\n");
+    uint8_t blob[16];
+    build_badrows_blob(blob, sizeof(blob), 0, 0, 0, 0, 0);
+
+    badmem_row_t out[8];
+    // Supply only 10 bytes — header OK but tuple data missing.
+    unsigned n = badmem_parse_rows_blob(blob, 10, out, 8);
+    ASSERT_EQ(n, 0);
+}
+
+static void test_rows_blob_null(void)
+{
+    printf("test: badmem_parse_rows_blob null blob returns 0\n");
+    badmem_row_t out[8];
+    unsigned n = badmem_parse_rows_blob(NULL, 16, out, 8);
+    ASSERT_EQ(n, 0);
+}
+
+static void test_rows_blob_cap(void)
+{
+    printf("test: badmem_parse_rows_blob capped at out_max\n");
+    // Build a blob with 3 tuples.
+    uint8_t blob[8 + 3 * 8];
+    uint32_t version = 1, count = 3;
+    blob[0] = 1; blob[1] = 0; blob[2] = 0; blob[3] = 0;  // version
+    blob[4] = 3; blob[5] = 0; blob[6] = 0; blob[7] = 0;  // count
+    (void)version; (void)count;
+    for (int i = 0; i < 3; i++) {
+        int off = 8 + i * 8;
+        blob[off+0] = (uint8_t)i;  // ch
+        blob[off+1] = 0;  // rank
+        blob[off+2] = 0;  // bg
+        blob[off+3] = 0;  // bank
+        blob[off+4] = (uint8_t)i; blob[off+5] = 0; blob[off+6] = 0; blob[off+7] = 0;  // row
+    }
+    badmem_row_t out[2];
+    unsigned n = badmem_parse_rows_blob(blob, sizeof(blob), out, 2);
+    ASSERT_EQ(n, 2);  // capped at out_max=2
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -335,6 +438,14 @@ int main(void)
     test_chip_plain_comment_not_chip();
     test_chip_cap_at_max();
     test_chip_compat_old_api();
+
+    printf("\n--- BrrBadRows binary blob tests ---\n\n");
+
+    test_rows_blob_single();
+    test_rows_blob_bad_version();
+    test_rows_blob_truncated();
+    test_rows_blob_null();
+    test_rows_blob_cap();
 
     printf("\n");
     if (g_fail == 0) {

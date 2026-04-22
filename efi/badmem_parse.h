@@ -62,4 +62,29 @@ void badmem_parse_full(const char *buf, uint64_t file_len,
 unsigned badmem_parse(const char *buf, uint64_t len,
                       badmem_range_t *out, unsigned out_max);
 
+// ---------------------------------------------------------------------------
+// BrrBadRows binary blob parser (Track C).
+// ---------------------------------------------------------------------------
+
+// One bad-row tuple as stored in BrrBadRows NVRAM and decoded here.
+typedef struct {
+    uint8_t  channel;
+    uint8_t  rank;
+    uint8_t  bank_group;
+    uint8_t  bank;
+    uint32_t row;
+} badmem_row_t;
+
+#define BADMEM_MAX_ROWS  256
+
+// Parse the binary BrrBadRows NVRAM blob.
+// blob:     pointer to raw NVRAM data.
+// blob_sz:  byte count of blob.
+// out:      caller-allocated array of at least out_max entries.
+// out_max:  capacity of out[].
+// Returns number of valid tuples written to out[].
+// Returns 0 on parse error (bad version, truncated blob, etc.).
+unsigned badmem_parse_rows_blob(const void *blob, unsigned blob_sz,
+                                badmem_row_t *out, unsigned out_max);
+
 #endif /* BADMEM_PARSE_H */

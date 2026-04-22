@@ -56,6 +56,19 @@ Living list. PRs welcome. Tick when landed; move to CHANGELOG if kept.
 
 ## P2 — UX / build / distribution
 
+- [ ] **macOS-crash → re-run memtest hook.** Register a pre-boot EFI sub-program
+  that detects macOS panic (e.g. via NVRAM `IOPlatformPanicInfo`, dumpfile
+  marker, or last-boot-was-crash heuristic) and, when set, forces grub to
+  auto-select memtest on next boot instead of booting macOS normally. After
+  memtest pass, append any newly-detected bad PAs to `BrrBadPages` /
+  `BrrBadRows`. Could be implemented as:
+    - EFI driver that hooks before Apple `boot.efi`, reads panic flag, chains
+      to mask-shim or memtest accordingly.
+    - OR: the installed shim checks panic state and prompts the user "macOS
+      panicked last boot — run memtest to rescan? Y/N".
+  Needs research on where macOS stores panic evidence pre-relaunch.
+
+
 - [ ] **Separate FAT32 data partition for `Log.txt`** — user request: so a
   second Mac can read error logs off the USB stick without reflashing.
   ISO currently single partition (ISO9660+ESP). Add a 3rd partition

@@ -20,7 +20,7 @@
 #include "screen.h"
 
 #include "board_topology.h"
-#include "cfl_decode.h"
+#include "imc_dispatch.h"
 #include "efi_menu.h"      /* BRR_FLAG_* definitions */
 
 // boot.h declares boot_params_addr (the linker symbol written by startup*.S).
@@ -78,7 +78,7 @@ void board_calibrate(void)
     clear_phase();
     r = PHASE_ROW_TOP;
 
-    const struct mc_config *mc = cfl_mc_config();
+    const struct mc_config *mc = imc_config();
     if (!mc) {
         printf(r++, 0, "Coffee Lake IMC not detected. CPU unsupported.");
         countdown("end", PAUSE_SECONDS);
@@ -106,13 +106,21 @@ void board_calibrate(void)
         mc->mad_intra_ch0, mc->mad_intra_ch1);
 
     // Rank decode probe: show what decoder would emit on a neutral PA.
-    struct pa_decoded probe = cfl_decode_pa(0x40000000ULL);  // 1 GiB mark
+    struct pa_decoded probe = imc_decode_pa(0x40000000ULL);  // 1 GiB mark
     const char *rk_src;
     if (!probe.rank_valid)           rk_src = "ambiguous (hedging both)";
     else if (probe.rank_speculative) rk_src = "speculative (MAD_INTRA)";
     else                             rk_src = "certain (1R channel)";
     printf(r++, 0, "rank decode @ PA=1GiB: ch%u rk%u -- %s",
         probe.channel, probe.rank, rk_src);
+
+    // Bank/row/col decode probe (DRAMDig Skylake XOR prior).
+    const char *br_src = probe.bank_row_valid
+        ? (probe.bank_row_speculative ? "speculative (DRAMDig prior)" : "validated")
+        : "unavailable";
+    if (r <= PHASE_ROW_BOT - 1)
+        printf(r++, 0, "bank/row decode @ PA=1GiB: bg=%u bank=%u row=%x -- %s",
+            probe.bank_group, probe.bank, probe.row, br_src);
 
     countdown("imc-config", PAUSE_SECONDS);
 
@@ -142,7 +150,7 @@ void board_calibrate(void)
     clear_phase();
     r = PHASE_ROW_TOP;
     printf(r++, 0, "--- MCHBAR 0x5000..0x5100 dump ---");
-    cfl_dump_mchbar_at(r, PHASE_ROW_BOT);
+    imc_dump_mchbar_at(r, PHASE_ROW_BOT);
 
     countdown("mchbar", PAUSE_SECONDS);
 

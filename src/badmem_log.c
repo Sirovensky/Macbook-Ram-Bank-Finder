@@ -330,3 +330,95 @@ void badmem_log_flush_nvram(void)
     set_var((efi_char16_t *)LEGACY_VARNAME_STATE,
             (efi_guid_t *)&BRR_GUID, 0, 0, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Row accumulator (Track C).
+// ---------------------------------------------------------------------------
+
+// Variable name for bad-row tuples.  L"BrrBadRows"
+static const efi_char16_t BRR_VARNAME_BADROWS[] = {
+    'B','r','r','B','a','d','R','o','w','s', 0
+};
+
+#define MAX_BAD_ROWS  256
+
+// Packed tuple: ch, rank, bg, bank (1 byte each) + row (4 bytes) = 8 bytes.
+typedef struct {
+    uint8_t  ch;
+    uint8_t  rank;
+    uint8_t  bg;
+    uint8_t  bank;
+    uint32_t row;
+} bad_row_t;
+
+static bad_row_t row_log[MAX_BAD_ROWS];
+static unsigned  row_count;
+
+void badmem_log_record_row(uint8_t channel, uint8_t rank,
+                            uint8_t bg, uint8_t bank, uint32_t row)
+{
+    // Deduplicate: scan existing entries.
+    for (unsigned i = 0; i < row_count; i++) {
+        if (row_log[i].ch   == channel &&
+            row_log[i].rank == rank    &&
+            row_log[i].bg   == bg      &&
+            row_log[i].bank == bank    &&
+            row_log[i].row  == row)
+            return;  // already recorded
+    }
+
+    if (row_count >= MAX_BAD_ROWS) return;  // cap
+
+    row_log[row_count].ch   = channel;
+    row_log[row_count].rank = rank;
+    row_log[row_count].bg   = bg;
+    row_log[row_count].bank = bank;
+    row_log[row_count].row  = row;
+    row_count++;
+}
+
+// Binary blob header written to BrrBadRows.
+typedef struct {
+    uint32_t version;   // = 1
+    uint32_t count;     // number of bad_row_t tuples that follow
+} badrows_hdr_t;
+
+void badmem_log_flush_rows_nvram(void)
+{
+    if (row_count == 0) return;
+
+    efi_runtime_services_t *rt = hwctrl_get_efi_rt();
+    if (!rt) return;
+
+    unsigned n = row_count;
+    if (n > MAX_BAD_ROWS) n = MAX_BAD_ROWS;
+
+    // blob: 8-byte header + n * 8-byte tuples = max 2056 bytes.
+    static uint8_t blob[sizeof(badrows_hdr_t) + MAX_BAD_ROWS * sizeof(bad_row_t)];
+    badrows_hdr_t *hdr = (badrows_hdr_t *)blob;
+    hdr->version = 1;
+    hdr->count   = n;
+
+    bad_row_t *dst = (bad_row_t *)(blob + sizeof(badrows_hdr_t));
+    for (unsigned i = 0; i < n; i++) dst[i] = row_log[i];
+
+    uintn_t blob_size = sizeof(badrows_hdr_t) + (uintn_t)n * sizeof(bad_row_t);
+
+    set_variable_fn set_var = (set_variable_fn)(uintptr_t)rt->set_variable;
+
+    efi_status_t s = set_var(
+        (efi_char16_t *)BRR_VARNAME_BADROWS,
+        (efi_guid_t *)&BRR_GUID,
+        EFI_VAR_NV_BS_RT,
+        blob_size, blob);
+
+    if (s == EFI_SUCCESS) {
+        display_scrolled_message(0, "[nvram] saved %u bad row(s) to BrrBadRows", n);
+        scroll();
+    } else {
+        display_scrolled_message(0,
+            "[nvram] WARNING: could not save BrrBadRows (status %x)",
+            (unsigned)s);
+        scroll();
+    }
+}

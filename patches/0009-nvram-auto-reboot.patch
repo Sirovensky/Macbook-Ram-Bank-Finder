@@ -1,6 +1,6 @@
 --- a/app/main.c
 +++ b/app/main.c
-@@ -737,6 +737,24 @@ void main(void)
+@@ -737,6 +737,27 @@ void main(void)
              extern void badmem_log_dump(void);
              if (pass_num > 0)
                  badmem_log_dump();
@@ -8,6 +8,9 @@
 +            // when RT services unavailable).  Eliminates screen-photo workflow.
 +            extern void badmem_log_flush_nvram(void);
 +            badmem_log_flush_nvram();
++            // BRR Track C: flush accumulated bad rows to BrrBadRows NVRAM.
++            extern void badmem_log_flush_rows_nvram(void);
++            badmem_log_flush_rows_nvram();
 +            // BRR: if Automatic mode was selected ([P]/[C] in EFI menu), wait
 +            // 5 s so the NVRAM save result is visible, then reboot.
 +            // BRR_FLAG_AUTO_REBOOT_AFTER_PASS == bit 2 == (1u << 2).
