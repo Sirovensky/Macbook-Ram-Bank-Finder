@@ -39,8 +39,10 @@ objs=(
     "board/board_table.o"
     "board/cfl_decode.o"
     "board/error_hook.o"
+    "board/badmem_log.o"
     "board/smbios_wrap.o"
     "board/calibration.o"
+    "board/efi_menu.o"
 )
 
 if ! grep -q "board/board_topology.o" "$mk"; then
@@ -61,6 +63,26 @@ if ! grep -q "board/board_topology.o" "$mk"; then
     ' "$mk" > "$mk.new" && mv "$mk.new" "$mk"
     sed -i.bak 's|-I../../tests|-I../../system/board -I../../tests|' "$mk"
     rm -f "$mk.bak"
+else
+    # Makefile already has the initial board/ objects; additive injection for
+    # any object added later (idempotent: grep before inserting).
+    for o in "${objs[@]}"; do
+        if ! grep -q "system/${o}" "$mk"; then
+            echo "==> injecting system/${o} into Makefile SYS_OBJS"
+            # Insert after the last "           system/board/..." continuation
+            # line (the SYS_OBJS entries use exactly 11 leading spaces).
+            awk -v obj="           system/${o} \\" '
+                /^           system\/board\/.*\.o/ { last = NR }
+                { lines[NR] = $0 }
+                END {
+                    for (i = 1; i <= NR; i++) {
+                        print lines[i]
+                        if (i == last) print obj
+                    }
+                }
+            ' "$mk" > "$mk.new" && mv "$mk.new" "$mk"
+        fi
+    done
 fi
 
 # 3b. Add a pattern rule for system/board/%.o (upstream's system/%.o rule
@@ -100,5 +122,12 @@ apply_patch 0001-hook-error-reporter.patch     "board_report_error"    "app/erro
 apply_patch 0002-startup-calibration.patch     "board_calibrate"       "app/main.c"
 apply_patch 0003-font-scale.patch              "lfb_scale"             "system/screen.c"
 apply_patch 0004-smbios3.patch                 "parse_smbios3_anchor"  "system/smbios.c"
+apply_patch 0005-badmem-log-dump.patch         "badmem_log_dump"       "app/main.c"
+# Track B: EFI pre-boot menu + boot_params flags
+apply_patch 0006-bootparams-a1990-flags.patch  "a1990_flags"           "boot/bootparams.h"
+apply_patch 0007-efi-pre-boot-menu.patch       "efi_menu"              "boot/efisetup.c"
+# Track C: NVRAM auto-save and auto-reboot
+apply_patch 0008-expose-efi-rt.patch           "hwctrl_get_efi_rt"     "system/x86/hwctrl.c"
+apply_patch 0009-nvram-auto-reboot.patch       "badmem_log_flush_nvram" "app/main.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"

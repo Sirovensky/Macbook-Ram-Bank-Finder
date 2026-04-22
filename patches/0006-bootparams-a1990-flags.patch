@@ -1,0 +1,16 @@
+--- a/boot/bootparams.h
++++ b/boot/bootparams.h
+@@ -104,7 +104,12 @@ typedef struct {
+     uint32_t        cmd_line_ptr;
+     uint8_t         unused6[0x238 - 0x22c];
+     uint32_t        cmd_line_size;
+-    uint8_t         unused7[0x2d0 - 0x23c];
++    // BRR fork: flags written by the EFI loader pre-ExitBootServices
++    // and read by the application.  Occupies the first 4 bytes of the
++    // Linux boot protocol's unused7 gap (0x23c..0x2d0); remaining bytes
++    // keep the fixed-offset fields below aligned correctly.
++    uint32_t        brr_flags;
++    uint8_t         unused7[0x2d0 - 0x240];
+     e820_entry_t    e820_map[E820_MAP_SIZE];
+     uint8_t         unused8[0xeec - 0xd00];
+ } __attribute__((packed)) boot_params_t;

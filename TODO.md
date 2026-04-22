@@ -4,21 +4,34 @@ Living list. PRs welcome. Tick when landed; move to CHANGELOG if kept.
 
 ## P0 — correctness blockers
 
-- [ ] **Rank decode** — currently every failing address shows **two** suspect
-  chips (one per rank). Need to decode rank from PA so output narrows to one.
-  - Verify `MAD_INTRA_CHx` bit layout — A1990 reads `0x00000110` on both
-    channels, likely encodes rank-interleave PA-bit index at `[8:4]` or
-    `[4:0]`. First attempt: treat as PA-bit index, XOR-fold into rank.
-  - Fix rank-count decode: `MAD_DIMM` bit[10]=1 on known 2R config currently
-    reads as `x16 width` (wrong — should be `2R` flag, width is `x16`
-    everywhere on A1990 so bit is ambiguous). Needs second calibration
-    data point from an x8 SODIMM laptop to disambiguate.
-
-- [ ] **Byte-lane → U-designator mapping is tentative** (`topology/820-01814-a.yaml`
-  has `verified: false`). Per-lane mapping was guessed from designator
-  groupings (U23x0 = lanes 0-1, U23x1 = lanes 2-3, etc.). Confirm by
-  tracing DQ nets on the 820-01814 schematic or by single-chip fault
-  injection. Flip `verified: true` once confirmed.
+- [x] **Byte-lane → U-designator mapping verified.** Traced from
+  `vendor/820-01814-schematic.pdf` via `scripts/trace-dq.py`. All 16
+  chips confirmed: 8 per channel, each an x8 chip owning exactly one
+  byte lane. `topology/820-01814-a.yaml` flipped to `verified: true`.
+- [x] **A1990 is 1R per channel, not 2R.** Earlier assumption was wrong.
+  32 GB = 2 channels × 1 rank × 8 × 2 GB (Micron MT40A2G8-NRE). CS#
+  routing confirms single chip-select per channel. Consequence: rank
+  decode is **always** certain on A1990 (rank=0). MAD_INTRA speculation
+  only matters if/when we target a different 2R CFL/KBL board.
+- [x] **Rank decode (speculative, for 2R boards)** — `decode_rank()` in
+  `cfl_decode.c` parses `MAD_INTRA_CHx` as
+  `bit[8]=rank-interleave-enable`, `bits[4:0]=PA-bit-index`. 1R channels
+  short-circuit to rank=0 (certain). Speculative path marks output with
+  `~`. Not exercised on A1990; kept as the placeholder for future 2R
+  boards.
+- [ ] **Confirm MAD_INTRA layout on a real 2R board.** Needed before we
+  trust speculative rank decode. Options:
+    - dump from any CFL/KBL laptop with 2R SODIMM (Dell XPS 15 9570,
+      etc.) — different MAD_INTRA value would confirm or falsify the
+      bit[8]+[4:0] interpretation.
+    - fault injection on a known-bad 2R chip where failing rank is
+      physically identified.
+- [ ] **Rank-count decode bit location** — on A1990 the IMC-reported
+  rank count happens to come out correct (bits[9:8]=0 → 1R) but bit[10]
+  is still set (reads as `x16 width` under current decode). Since A1990
+  chips are actually x8, bit[10] is **not** a width flag. Needs a
+  2R-x8 SODIMM data point to relabel. Tier-1 (no-overlay) output
+  currently misreports chip width on A1990.
 
 - [ ] **Skylake/Coffee Lake MAD_DIMM bit-field layout is reverse-engineered,
   not documented.** coreboot has no SKL+ raminit (all FSP-blob). Current
@@ -49,10 +62,17 @@ Living list. PRs welcome. Tick when landed; move to CHANGELOG if kept.
   mounted RW with newline-appended log. Needs memtest86plus write
   support for USB block devices (currently read-only).
 
-- [ ] **External keyboard fallback** — A1990 T2 blocks internal USB HID,
-  but USB-C external keyboards may enumerate. Detect, and if present
-  restore `get_key()` interactive menus instead of forcing timed
-  countdowns.
+- [x] **External keyboard fallback** — confirmed dead on T2 (both internal
+  and USB-C external fail in memtest's xHCI stack). Replaced with
+  ConIn-based pre-ExitBootServices menu (`src/efi_menu.c`). See
+  `docs/KEYBOARD_T2.md`.
+
+- [x] **Chip-level mask policy** — per-chip masking implemented.
+  `# chip: UXXXX` directives in `badmem.txt` cause the shim to walk
+  all PAs and reserve every page that decodes to the bad chip's
+  (channel, rank). On A1990 (1R per channel) this masks one full
+  channel — 16 GiB. Region and chip entries may be mixed freely.
+  See `docs/MASKING.md` "Granularity" section and `docs/BADMEM_FORMAT.md`.
 
 - [ ] **Boardview integration** — show failing chip location visually.
   Parse `.bdv`/`.fz` format (stored locally only, gitignored), render

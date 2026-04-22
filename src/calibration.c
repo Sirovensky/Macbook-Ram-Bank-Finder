@@ -4,10 +4,14 @@
 // the scroll region so contributors can photograph the values and feed
 // them into new YAML topology files.
 //
-// A1990 (and any T2 Mac) has no working keyboard input, so all pauses
-// are time-based countdowns. Output uses fixed-row printf() rather than
-// display_scrolled_message() so important lines stay put — each phase
-// clears the scroll region and re-prints from the top.
+// A1990 (and any T2 Mac) has no working keyboard input after ExitBootServices,
+// so all pauses are time-based countdowns.  The EFI pre-boot menu (efi_menu.c)
+// can set flags in boot_params_t::brr_flags before ExitBootServices to:
+//   BRR_FLAG_SKIP_COUNTDOWNS -- suppress the timed photo pauses (fast mode)
+//   BRR_FLAG_CALIBRATE_ONLY  -- halt after calibration instead of running tests
+// Output uses fixed-row printf() rather than display_scrolled_message() so
+// important lines stay put -- each phase clears the scroll region and re-prints
+// from the top.
 
 #include "stdint.h"
 #include "stdbool.h"
@@ -17,6 +21,20 @@
 
 #include "board_topology.h"
 #include "cfl_decode.h"
+#include "efi_menu.h"      /* BRR_FLAG_* definitions */
+
+// boot.h declares boot_params_addr (the linker symbol written by startup*.S).
+// bootparams.h declares boot_params_t including the brr_flags field added
+// by patch 0006-bootparams-a1990-flags.patch.
+// Both headers are reachable via -I../../boot in INC_DIRS.
+#include "boot.h"
+#include "bootparams.h"
+
+static uint32_t read_brr_flags(void)
+{
+    if (boot_params_addr == 0) return 0;
+    return ((const boot_params_t *)boot_params_addr)->brr_flags;
+}
 
 extern void sleep(unsigned int sec);
 
@@ -34,6 +52,11 @@ static void clear_phase(void)
 
 static void countdown(const char *tag, unsigned seconds)
 {
+    // If SKIP_COUNTDOWNS was requested from the EFI menu, suppress pauses.
+    if (read_brr_flags() & BRR_FLAG_SKIP_COUNTDOWNS) {
+        clear_screen_region(STATUS_ROW, 0, STATUS_ROW, SCREEN_WIDTH - 1);
+        return;
+    }
     for (unsigned s = seconds; s > 0; s--) {
         clear_screen_region(STATUS_ROW, 0, STATUS_ROW, SCREEN_WIDTH - 1);
         printf(STATUS_ROW, 0, "--- %s --- photo NOW --- %u s ---", tag, s);
@@ -82,6 +105,15 @@ void board_calibrate(void)
     printf(r++, 0, "MAD_INTRA_CH0=%08x MAD_INTRA_CH1=%08x",
         mc->mad_intra_ch0, mc->mad_intra_ch1);
 
+    // Rank decode probe: show what decoder would emit on a neutral PA.
+    struct pa_decoded probe = cfl_decode_pa(0x40000000ULL);  // 1 GiB mark
+    const char *rk_src;
+    if (!probe.rank_valid)           rk_src = "ambiguous (hedging both)";
+    else if (probe.rank_speculative) rk_src = "speculative (MAD_INTRA)";
+    else                             rk_src = "certain (1R channel)";
+    printf(r++, 0, "rank decode @ PA=1GiB: ch%u rk%u -- %s",
+        probe.channel, probe.rank, rk_src);
+
     countdown("imc-config", PAUSE_SECONDS);
 
     // Phase 2 — board identification. This is the most important screen.
@@ -115,5 +147,18 @@ void board_calibrate(void)
     countdown("mchbar", PAUSE_SECONDS);
 
     clear_phase();
+
+    if (read_brr_flags() & BRR_FLAG_CALIBRATE_ONLY) {
+        // User pressed [C] in the EFI menu: halt here after showing results.
+        printf(PHASE_ROW_TOP,     0, "=== calibration done; halting (calibrate-only mode) ===");
+        printf(PHASE_ROW_TOP + 1, 0, "Power off or reset the machine.");
+        // Spin forever -- tests must not start.
+        while (1) {
+#if defined(__x86_64__) || defined(__i386__)
+            __asm__ __volatile__("hlt");
+#endif
+        }
+    }
+
     printf(PHASE_ROW_TOP, 0, "=== calibration done; tests starting ===");
 }

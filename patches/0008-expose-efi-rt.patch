@@ -1,0 +1,17 @@
+--- a/system/x86/hwctrl.c
++++ b/system/x86/hwctrl.c
+@@ -29,6 +29,14 @@ static efi_runtime_services_t   *efi_rs_table = NULL;
+ // Public Functions
+ //------------------------------------------------------------------------------
+
++// Expose the cached Runtime Services pointer so board-level code (e.g.
++// badmem_log.c) can call SetVariable / ResetSystem post-ExitBootServices.
++// Returns NULL on BIOS boot or when the EFI system table was not found.
++efi_runtime_services_t *hwctrl_get_efi_rt(void)
++{
++    return efi_rs_table;
++}
++
+ void hwctrl_init(void)
+ {
+     boot_params_t *boot_params = (boot_params_t *)boot_params_addr;

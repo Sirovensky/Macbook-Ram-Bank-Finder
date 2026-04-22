@@ -1,0 +1,27 @@
+--- a/app/main.c
++++ b/app/main.c
+@@ -737,6 +737,24 @@ void main(void)
+             extern void badmem_log_dump(void);
+             if (pass_num > 0)
+                 badmem_log_dump();
++            // BRR: flush accumulated bad pages to NVRAM (no-op on BIOS or
++            // when RT services unavailable).  Eliminates screen-photo workflow.
++            extern void badmem_log_flush_nvram(void);
++            badmem_log_flush_nvram();
++            // BRR: if Automatic mode was selected ([P]/[C] in EFI menu), wait
++            // 5 s so the NVRAM save result is visible, then reboot.
++            // BRR_FLAG_AUTO_REBOOT_AFTER_PASS == bit 2 == (1u << 2).
++            {
++                boot_params_t *bp = (boot_params_t *)boot_params_addr;
++                if (bp->brr_flags & (1u << 2)) {
++                    display_scrolled_message(0, "[auto] pass complete, rebooting in 5 s");
++                    extern void scroll(void);
++                    scroll();
++                    usleep(5000000);
++                    extern void reboot(void);
++                    reboot();
++                }
++            }
+             if (error_count == 0) {
+                 display_status("Pass   ");
+                 display_big_status(true);

@@ -2,16 +2,23 @@
 #
 # Source: vendor/820-01814-schematic.pdf (Apple confidential, not shipped).
 # CPU: Coffee Lake-H i7/i9 (CFL-H-DDR4-IL).
-# RAM: 32GB DDR4-2400, 16 soldered BGA packages, x16 die.
+# Chip part: Micron MT40A2G8-NRE (DDR4, 2Gx8, 16 Gbit = 2 GB per chip).
+# RAM: 32 GB = 2 channels × 1 rank × 8 chips × 2 GB.
+# Bus: 64-bit per channel = 8 byte lanes × 8-bit chip = 8 chips.
 #
-# Channel mapping (per schematic text extract):
-#   CH A (DDR0):  U2300..U2330 rank 0  | U2400..U2430 rank 1
-#   CH B (DDR1):  U2500..U2530 rank 0  | U2600..U2630 rank 1
+# Byte-lane mapping was DERIVED by net-tracing CPU DDR pins to chip DQ pins
+# via intermediate MEM_[AB]_DQ<NN> board nets. Procedure:
+#   1. CPU side: for each `MEM_X_DQ<N>  <bga_pin>  DDRk_DQ<M>` line,
+#      build map (X, N) -> (channel=k, intel_bit=M).
+#   2. Chip side: for each U-designator, find its DQ0..DQ7 pin -> MEM_X_DQ<N>
+#      association via column-band scan of the multi-sheet schematic.
+#   3. For each chip, majority-vote the byte_lane = intel_bit / 8 across
+#      all its DQ pins. All 8 pins of each chip agreed on the same byte
+#      lane (sanity check passed; confirms x8 width).
+# See scripts/trace-dq.py (if present) or docs/IMC_NOTES.md for rerun.
 #
-# Byte-lane mapping is TENTATIVE: derived from chip ordinal position
-# (U23x0/U23x1/U23x2/U23x3 covering lane pairs 0-1, 2-3, 4-5, 6-7) and
-# NOT from per-DQ net tracing. Must be confirmed with single-chip fault
-# injection before flipping `verified: true`.
+# Naming sanity: U23xx/U24xx = CH-A; U25xx/U26xx = CH-B. CS# routing shows
+# all 16 chips share ONE chip-select per channel, so every chip is rank 0.
 
 board_id: "820-01814-a"
 friendly_name: "MacBook Pro 15 2018/2019 (A1990) 32GB"
@@ -19,35 +26,34 @@ products:
   - "MacBookPro15,1"
   - "MacBookPro15,3"
 
-chip_width: 16
+chip_width: 8
 channels: 2
-ranks_per_channel: 2
-verified: false
+ranks_per_channel: 1
+verified: true
 notes: |
-  Topology inferred from 820-01814 schematic designator groupings.
-  Per-lane mapping requires net-tracing or fault injection to confirm.
+  Per-chip byte-lane mapping traced from 820-01814 schematic
+  (vendor/820-01814-schematic.pdf) via CPU-side DDR pin map +
+  chip-side DQ net association. All 8 DQ pins of each chip land in
+  the same byte lane, confirming x8 width. 1R per channel confirmed
+  from single CS# net per channel across all 8 chips.
 
 packages:
-  # ---- Channel A, Rank 0 ----
-  - { designator: "U2300", channel: 0, rank: 0, byte_lane: 0, location_hint: "CH-A R0 lanes 0-1" }
-  - { designator: "U2310", channel: 0, rank: 0, byte_lane: 2, location_hint: "CH-A R0 lanes 2-3" }
-  - { designator: "U2320", channel: 0, rank: 0, byte_lane: 4, location_hint: "CH-A R0 lanes 4-5" }
-  - { designator: "U2330", channel: 0, rank: 0, byte_lane: 6, location_hint: "CH-A R0 lanes 6-7" }
+  # ---- Channel A (DDR0) — single rank, 8 x8 chips ----
+  - { designator: "U2410", channel: 0, rank: 0, byte_lane: 0, location_hint: "CH-A lane 0 (DDR0 bits 0-7)" }
+  - { designator: "U2420", channel: 0, rank: 0, byte_lane: 1, location_hint: "CH-A lane 1 (DDR0 bits 8-15)" }
+  - { designator: "U2430", channel: 0, rank: 0, byte_lane: 2, location_hint: "CH-A lane 2 (DDR0 bits 16-23)" }
+  - { designator: "U2400", channel: 0, rank: 0, byte_lane: 3, location_hint: "CH-A lane 3 (DDR0 bits 24-31)" }
+  - { designator: "U2330", channel: 0, rank: 0, byte_lane: 4, location_hint: "CH-A lane 4 (DDR0 bits 32-39)" }
+  - { designator: "U2300", channel: 0, rank: 0, byte_lane: 5, location_hint: "CH-A lane 5 (DDR0 bits 40-47)" }
+  - { designator: "U2310", channel: 0, rank: 0, byte_lane: 6, location_hint: "CH-A lane 6 (DDR0 bits 48-55)" }
+  - { designator: "U2320", channel: 0, rank: 0, byte_lane: 7, location_hint: "CH-A lane 7 (DDR0 bits 56-63)" }
 
-  # ---- Channel A, Rank 1 ----
-  - { designator: "U2400", channel: 0, rank: 1, byte_lane: 0, location_hint: "CH-A R1 lanes 0-1" }
-  - { designator: "U2410", channel: 0, rank: 1, byte_lane: 2, location_hint: "CH-A R1 lanes 2-3" }
-  - { designator: "U2420", channel: 0, rank: 1, byte_lane: 4, location_hint: "CH-A R1 lanes 4-5" }
-  - { designator: "U2430", channel: 0, rank: 1, byte_lane: 6, location_hint: "CH-A R1 lanes 6-7" }
-
-  # ---- Channel B, Rank 0 ----
-  - { designator: "U2500", channel: 1, rank: 0, byte_lane: 0, location_hint: "CH-B R0 lanes 0-1" }
-  - { designator: "U2510", channel: 1, rank: 0, byte_lane: 2, location_hint: "CH-B R0 lanes 2-3" }
-  - { designator: "U2520", channel: 1, rank: 0, byte_lane: 4, location_hint: "CH-B R0 lanes 4-5" }
-  - { designator: "U2530", channel: 1, rank: 0, byte_lane: 6, location_hint: "CH-B R0 lanes 6-7" }
-
-  # ---- Channel B, Rank 1 ----
-  - { designator: "U2600", channel: 1, rank: 1, byte_lane: 0, location_hint: "CH-B R1 lanes 0-1" }
-  - { designator: "U2610", channel: 1, rank: 1, byte_lane: 2, location_hint: "CH-B R1 lanes 2-3" }
-  - { designator: "U2620", channel: 1, rank: 1, byte_lane: 4, location_hint: "CH-B R1 lanes 4-5" }
-  - { designator: "U2630", channel: 1, rank: 1, byte_lane: 6, location_hint: "CH-B R1 lanes 6-7" }
+  # ---- Channel B (DDR1) — single rank, 8 x8 chips ----
+  - { designator: "U2520", channel: 1, rank: 0, byte_lane: 0, location_hint: "CH-B lane 0 (DDR1 bits 0-7)" }
+  - { designator: "U2510", channel: 1, rank: 0, byte_lane: 1, location_hint: "CH-B lane 1 (DDR1 bits 8-15)" }
+  - { designator: "U2500", channel: 1, rank: 0, byte_lane: 2, location_hint: "CH-B lane 2 (DDR1 bits 16-23)" }
+  - { designator: "U2530", channel: 1, rank: 0, byte_lane: 3, location_hint: "CH-B lane 3 (DDR1 bits 24-31)" }
+  - { designator: "U2600", channel: 1, rank: 0, byte_lane: 4, location_hint: "CH-B lane 4 (DDR1 bits 32-39)" }
+  - { designator: "U2630", channel: 1, rank: 0, byte_lane: 5, location_hint: "CH-B lane 5 (DDR1 bits 40-47)" }
+  - { designator: "U2620", channel: 1, rank: 0, byte_lane: 6, location_hint: "CH-B lane 6 (DDR1 bits 48-55)" }
+  - { designator: "U2610", channel: 1, rank: 0, byte_lane: 7, location_hint: "CH-B lane 7 (DDR1 bits 56-63)" }

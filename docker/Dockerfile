@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         dosfstools \
         patch \
         ca-certificates \
+        gnu-efi \
     && rm -rf /var/lib/apt/lists/*
 
 # Treat bind-mounted repo as "safe" even when UID mismatches.

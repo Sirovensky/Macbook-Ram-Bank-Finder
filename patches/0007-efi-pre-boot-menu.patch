@@ -1,0 +1,25 @@
+--- a/boot/efisetup.c
++++ b/boot/efisetup.c
+@@ -15,6 +15,8 @@
+ #include "memsize.h"
+
+ #include "string.h"
++
++#include "../system/board/efi_menu.h"
+
+ //------------------------------------------------------------------------------
+ // Constants
+@@ -787,6 +789,13 @@ boot_params_t *efi_setup(efi_handle_t handle, efi_system_table_t *sys_table_arg
+
+     parse_cmd_line(boot_params->cmd_line_ptr, boot_params->cmd_line_size);
+
++    // BRR Track B: show ConIn-backed pre-boot menu before ExitBootServices.
++    // The T2 security chip proxies the keyboard through a vendor USB HID path
++    // that memtest's xHCI stack cannot reach post-ExitBootServices.  ConIn is
++    // the only reliable input path; it becomes unavailable after the call below.
++    // Store the chosen flags so the application can honour them later.
++    boot_params->brr_flags = efi_menu(sys_table, handle);
++
+     status = set_screen_info(boot_params);
+     if (status != EFI_SUCCESS) {
+         print_string("set_screen_info() failed\n");

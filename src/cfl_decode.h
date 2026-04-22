@@ -41,6 +41,8 @@ struct pa_decoded {
     bool    valid;
     uint8_t channel;
     uint8_t rank;
+    bool    rank_valid;     // true when rank is known (1R channel or decoded)
+    bool    rank_speculative; // rank_valid but from unvalidated MAD_INTRA decode
     uint8_t bank_group;
     uint8_t bank;
     uint32_t row;

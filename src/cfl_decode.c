@@ -163,14 +163,34 @@ const struct mc_config *cfl_mc_config(void)
 
 // ---------------- PA decode ----------------
 //
-// Current implementation: channel only (best signal, cheapest win).
-// Rank/bank/row/col stubbed out pending A1990 calibration.
+// Current implementation: channel + rank (rank is speculative on 2R).
+// Bank/row/col stubbed out pending further calibration.
 //
 // Channel selection modes on client IMC:
 //   1. Symmetric + hash disabled:  PA[6] selects channel.
 //   2. Symmetric + hash enabled:   ch = popcount(PA & HASH_MASK) & 1.
 //   3. Asymmetric / ECM:           per-channel PA ranges (MAD_CHNL regs).
 // Only (1) and (2) are implemented here. ECM left as TODO.
+//
+// Rank selection: when only one rank is populated on a channel, rank=0
+// (certain). Otherwise MAD_INTRA_CHx is parsed with a speculative
+// interpretation (see decode_rank()).
+
+// MAD_INTRA_CHx speculative bit layout (Skylake/Coffee Lake client).
+//
+// No Intel public doc for this register. Inferred from:
+//   - Haswell MAD_DIMM bit[21]=rank_interleave_enable + rank addr bit.
+//   - A1990 reads 0x00000110 on both channels (32GB 2R x16). Bits [4]
+//     and [8] are set; if bit[8] is the enable and bits[4:0] are the PA
+//     bit index, index=0x10=16 -> PA[16] selects rank (64 KiB stride).
+//     A 16 KiB-64 KiB rank-interleave stride is a plausible IMC choice
+//     for reducing hotspot banks.
+// Flagged speculative; rank_speculative=true in output. Needs second
+// calibration data point (1R system, or x8 SODIMM 2R) to confirm.
+#define MAD_INTRA_RANK_IL_EN_BIT   (1u << 8)
+#define MAD_INTRA_RANK_BIT_MASK    0x1Fu
+#define MAD_INTRA_RANK_BIT_MIN     6      // below PA[6] = inside cache line
+#define MAD_INTRA_RANK_BIT_MAX     40     // above PA[40] = beyond any sane DRAM
 
 static uint8_t decode_channel(uint64_t pa, const struct mc_config *mc)
 {
@@ -193,6 +213,51 @@ static uint8_t decode_channel(uint64_t pa, const struct mc_config *mc)
     return parity;
 }
 
+static uint8_t channel_max_ranks(const struct mc_channel *ch)
+{
+    uint8_t m = 0;
+    for (int d = 0; d < 2; d++) {
+        if (!ch->dimm[d].populated) continue;
+        if (ch->dimm[d].ranks > m) m = ch->dimm[d].ranks;
+    }
+    return m;
+}
+
+static uint8_t decode_rank(uint64_t pa, uint8_t ch_idx,
+                           const struct mc_config *mc,
+                           bool *out_valid, bool *out_speculative)
+{
+    *out_valid = false;
+    *out_speculative = false;
+
+    const struct mc_channel *ch = &mc->channel[ch_idx];
+    uint8_t max_ranks = channel_max_ranks(ch);
+
+    // 1R channel: rank is known, no decode needed.
+    if (max_ranks <= 1) {
+        *out_valid = true;
+        return 0;
+    }
+
+    uint32_t intra = (ch_idx == 0) ? mc->mad_intra_ch0 : mc->mad_intra_ch1;
+    if (!(intra & MAD_INTRA_RANK_IL_EN_BIT)) {
+        // Rank-interleave disabled: ranks stacked linearly on PA[N] where
+        // N = log2(rank_size). We don't compute rank_size yet. Leave
+        // invalid so caller hedges.
+        return 0;
+    }
+
+    unsigned rank_bit = intra & MAD_INTRA_RANK_BIT_MASK;
+    if (rank_bit < MAD_INTRA_RANK_BIT_MIN ||
+        rank_bit > MAD_INTRA_RANK_BIT_MAX) {
+        return 0;
+    }
+
+    *out_valid = true;
+    *out_speculative = true;   // MAD_INTRA layout not Intel-confirmed
+    return (uint8_t)((pa >> rank_bit) & 0x1);
+}
+
 struct pa_decoded cfl_decode_pa(uint64_t pa)
 {
     struct pa_decoded d = { 0 };
@@ -200,10 +265,11 @@ struct pa_decoded cfl_decode_pa(uint64_t pa)
     if (!mc) return d;
 
     d.channel = decode_channel(pa, mc);
-    d.valid   = true;   // channel decode only — rank/bank/row/col unknown
+    d.rank    = decode_rank(pa, d.channel, mc,
+                            &d.rank_valid, &d.rank_speculative);
+    d.valid   = true;   // channel always decoded; rank_valid gates rank
 
-    // TODO: rank decode (MAD_DIMM rank-interleave bit + low PA bit).
-    // TODO: bank / row / col decode (requires MAD_INTRA understanding).
+    // TODO: bank / row / col decode (requires MAD_INTRA full layout).
 
     return d;
 }
