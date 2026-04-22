@@ -38,7 +38,7 @@ static uint32_t read_brr_flags(void)
 
 extern void sleep(unsigned int sec);
 
-#define PAUSE_SECONDS 10
+#define PAUSE_SECONDS 5
 
 // Phase uses the whole scroll region (rows 12..23 inclusive = 12 rows).
 #define PHASE_ROW_TOP    ROW_SCROLL_T
