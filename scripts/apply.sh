@@ -92,8 +92,15 @@ fi
 
 # 3b. Add pattern rules for system/board/%.o and system/board/imc/%.o
 # (upstream's system/%.o rule only mkdirs `system`, not the subdirs).
+#
+# IMPORTANT: inject BOTH rules in a single awk pass, before the upstream
+# `system/%.o: ../../system/%.c` rule.  Earlier versions injected the imc
+# rule by matching the already-injected board rule and splicing in between
+# the board rule's target line and its body — which orphaned the body and
+# left `system/board/%.o:` with no recipe (so .d files failed to write
+# into a non-existent directory).  Keep both rules adjacent and ordered.
 if ! grep -q "^system/board/%.o:" "$mk"; then
-    echo "==> adding system/board pattern rule"
+    echo "==> adding system/board + system/board/imc pattern rules"
     awk '
         /^system\/%\.o: \.\.\/\.\.\/system\/%\.c/ && !done {
             done = 1
@@ -101,22 +108,28 @@ if ! grep -q "^system/board/%.o:" "$mk"; then
             print "\t@mkdir -p system/board"
             print "\t$(CC) -c $(CFLAGS) $(OPT_SMALL) $(INC_DIRS) -o $@ $< -MMD -MP -MT $@ -MF $(@:.o=.d)"
             print ""
-        }
-        { print }
-    ' "$mk" > "$mk.new" && mv "$mk.new" "$mk"
-fi
-
-if ! grep -q "^system/board/imc/%.o:" "$mk"; then
-    echo "==> adding system/board/imc pattern rule"
-    awk '
-        /^system\/board\/%\.o: \.\.\/\.\.\/system\/board\/%\.c/ && !done {
-            done = 1
-            print $0
-            print ""
             print "system/board/imc/%.o: ../../system/board/imc/%.c"
             print "\t@mkdir -p system/board/imc"
             print "\t$(CC) -c $(CFLAGS) $(OPT_SMALL) $(INC_DIRS) -o $@ $< -MMD -MP -MT $@ -MF $(@:.o=.d)"
             print ""
+        }
+        { print }
+    ' "$mk" > "$mk.new" && mv "$mk.new" "$mk"
+elif ! grep -q "^system/board/imc/%.o:" "$mk"; then
+    # Backward-compat: older Makefile already had board rule but not imc.
+    # Inject imc rule immediately after the board rule body (detect end of
+    # body via blank line following the $(CC) line).
+    echo "==> adding system/board/imc pattern rule (board rule already present)"
+    awk '
+        /^system\/board\/%\.o: \.\.\/\.\.\/system\/board\/%\.c/ { in_board = 1 }
+        in_board && /^$/ && !done {
+            print $0
+            print "system/board/imc/%.o: ../../system/board/imc/%.c"
+            print "\t@mkdir -p system/board/imc"
+            print "\t$(CC) -c $(CFLAGS) $(OPT_SMALL) $(INC_DIRS) -o $@ $< -MMD -MP -MT $@ -MF $(@:.o=.d)"
+            print ""
+            done = 1
+            in_board = 0
             next
         }
         { print }
