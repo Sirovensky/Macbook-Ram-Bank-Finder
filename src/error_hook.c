@@ -180,4 +180,10 @@ void board_decode_pass(void)
             scroll();
         }
     }
+
+    // Audible announcement so user hears pass completion if they're
+    // away from the laptop.  Silent no-op on hardware where the PC
+    // speaker path is filtered (T2 may block port 0x61 writes).
+    extern void board_beep_pass_end(void);
+    board_beep_pass_end();
 }

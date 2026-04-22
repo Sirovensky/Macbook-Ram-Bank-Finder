@@ -49,6 +49,7 @@ objs=(
     "board/efi_menu.o"
     "board/decoder_selftest.o"
     "board/skip.o"
+    "board/beeper.o"
 )
 
 if ! grep -q "board/board_topology.o" "$mk"; then
