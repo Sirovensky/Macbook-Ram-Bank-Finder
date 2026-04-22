@@ -181,6 +181,56 @@ void badmem_log_record(uint64_t phys_addr)
 }
 
 // ---------------------------------------------------------------------------
+// Skip-list: 1 MiB regions to exclude from further testing this run.
+//
+// Populated by common_err() when an error burst is detected on a single
+// 1 MiB page (see app/error.c / patch 0013).  Queried by
+// board_prune_vm_map() which runs after every setup_vm_map() to remove
+// recorded regions from the test windows.  Dedupes + merges overlaps.
+// Capped at SKIP_MAX — each entry is 16 bytes, so 64 entries = 1 KiB.
+// ---------------------------------------------------------------------------
+
+#define SKIP_MAX  64
+
+static struct badmem_skip_range skip_list[SKIP_MAX];
+static unsigned skip_list_count;
+
+void badmem_log_add_skip(uint64_t start_pa, uint64_t end_pa)
+{
+    if (end_pa <= start_pa) return;
+
+    // Dedup / merge: if the new range overlaps or abuts an existing one,
+    // grow the existing entry and return.  This keeps chains of adjacent
+    // 1 MiB bursts from saturating the table.
+    for (unsigned i = 0; i < skip_list_count; i++) {
+        if (end_pa < skip_list[i].start || start_pa > skip_list[i].end) continue;
+        if (start_pa < skip_list[i].start) skip_list[i].start = start_pa;
+        if (end_pa   > skip_list[i].end)   skip_list[i].end   = end_pa;
+        return;
+    }
+
+    if (skip_list_count < SKIP_MAX) {
+        skip_list[skip_list_count].start = start_pa;
+        skip_list[skip_list_count].end   = end_pa;
+        skip_list_count++;
+    }
+    // If the table overflows we've already masked ~64 MiB in 1 MiB chunks —
+    // the chip is effectively dead.  The pass-end summary will show this
+    // count and the user can escalate to chip-mode manually.
+}
+
+const struct badmem_skip_range *badmem_log_skip_list(unsigned *out_count)
+{
+    if (out_count) *out_count = skip_list_count;
+    return skip_list;
+}
+
+unsigned badmem_log_skip_count(void)
+{
+    return skip_list_count;
+}
+
+// ---------------------------------------------------------------------------
 // Screen dump (original workflow — still used).
 // ---------------------------------------------------------------------------
 

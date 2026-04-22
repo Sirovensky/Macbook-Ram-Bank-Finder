@@ -48,6 +48,7 @@ objs=(
     "board/calibration.o"
     "board/efi_menu.o"
     "board/decoder_selftest.o"
+    "board/skip.o"
 )
 
 if ! grep -q "board/board_topology.o" "$mk"; then
@@ -183,6 +184,9 @@ apply_patch 0012-no-check-input-in-common-err.patch "BRR: do NOT call check_inpu
 # expands each logged PA +/- 1 MiB on the next boot so the masked
 # range covers the full failing chip region without ever re-running
 # the problematic test pattern against it.
-apply_patch 0013-early-bail-on-many-errors.patch "BRR: early-bail trigger" "app/error.c"
+apply_patch 0013-early-bail-on-many-errors.patch "BRR: fail-safe error-burst detector" "app/error.c"
+# Hook board_prune_vm_map() into setup_vm_map() so each new window is
+# pruned against the accumulated skip list before tests run on it.
+apply_patch 0015-vm-map-prune-hook.patch "board_prune_vm_map" "app/main.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"

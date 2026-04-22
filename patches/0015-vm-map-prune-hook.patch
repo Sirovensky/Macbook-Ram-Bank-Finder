@@ -1,0 +1,18 @@
+--- a/app/main.c
++++ b/app/main.c
+@@ -436,6 +436,15 @@ non_numa_vm_map_entry:
+             }
+         }
+     }
++    // BRR: after the base vm_map is built, strip any 1 MiB regions that
++    // the burst detector in common_err() has flagged as hardware-hostile.
++    // This lets the remaining tests run on good memory without ever
++    // touching the wedging region again.  board_prune_vm_map() is a no-op
++    // when the skip list is empty (the common case on healthy boards).
++    {
++        extern void board_prune_vm_map(void);
++        board_prune_vm_map();
++    }
+ #if 0
+     for (int i = 0; i < vm_map_size; i++) {
+         do_trace(0, "vm %0*x - %0*x", 2*sizeof(uintptr_t), vm_map[i].start, 2*sizeof(uintptr_t), vm_map[i].end);

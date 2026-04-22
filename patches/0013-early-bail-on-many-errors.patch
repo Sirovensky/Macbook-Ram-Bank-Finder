@@ -1,26 +1,64 @@
 --- a/app/error.c
 +++ b/app/error.c
-@@ -165,6 +165,29 @@ static void common_err(error_type_t type, uintptr_t addr, testword_t good, testw
+@@ -165,6 +165,67 @@ static void common_err(error_type_t type, uintptr_t addr, testword_t good, testw
  
      testword_t xor = good ^ bad;
  
-+    // BRR: early-bail trigger.
++    // BRR: fail-safe error-burst detector (runs under error_mutex —
++    // all state here is single-writer, no atomics needed).
 +    //
-+    // When a single DRAM chip is failing hard, an aggressive test like
-+    // block_move walks gigabytes of memory and produces tens of thousands
-+    // of data_error() -> common_err() calls per pass.  Each iteration
-+    // takes tens of microseconds under error_mutex; non-failing CPUs
-+    // finish their chunks quickly and park at the LONG_BARRIER waiting
-+    // for the failing CPU to drain its error storm.  The master CPU is
-+    // stuck in that barrier wait and do_tick() never runs — from the
-+    // outside the system looks hard-frozen (timer stopped, no progress).
++    // On A1990 (CL-H IMC + T2) a test hitting bad DRAM cells wedges
++    // the hardware after ~150-200 errors: timer stops, all CPUs dead.
++    // We act on two signals WELL BELOW that threshold:
 +    //
-+    // 128 errors is far more than enough to identify the bad chip (the
-+    // decoder reads the same designator regardless of how many more
-+    // errors arrive).  Flip `bail` so every test's BAILOUT macro returns
-+    // early; the main loop advances to the next test or pass-end.
++    //   (a) 8 errors inside a single 1 MiB page -> record that 1 MiB
++    //       as a skip range.  Subsequent test windows prune it from
++    //       vm_map (see system/board/skip.c::board_prune_vm_map) and
++    //       never touch it again.  Flip `bail` so the current test
++    //       returns immediately.  Decoder identifies the bad chip
++    //       from 1 error; 8 is a confidence margin.
++    //
++    //   (b) 16 total errors this pass -> flip `bail` regardless.
++    //       Catches whole-chip failures whose errors scatter across
++    //       many 1 MiB pages before any single page reaches 8.
++    //
++    // HARDENING FOR HIGH ERROR RATE: test 7 block_move produces errors
++    // as fast as the IMC can drain them.  If two CPUs both hit bad
++    // cells in DIFFERENT 1 MiB regions and their errors interleave, a
++    // single last-MB counter would keep resetting and never reach 8.
++    // We carry a 4-slot LRU cache of recent MB bases so up to four
++    // concurrent bad regions each build their own run count.
 +    extern bool bail;
-+    if (error_count >= 128 && !bail) {
++    extern void badmem_log_add_skip(uint64_t start_pa, uint64_t end_pa);
++
++    if (type == DATA_ERROR || type == ADDR_ERROR) {
++        #define MB_LRU_SLOTS 4
++        static struct { uintptr_t base; unsigned run; } lru[MB_LRU_SLOTS];
++        static unsigned lru_next;
++
++        uintptr_t mb_base = addr & ~((uintptr_t)0xFFFFF);
++
++        int slot = -1;
++        for (int i = 0; i < MB_LRU_SLOTS; i++) {
++            if (lru[i].base == mb_base && lru[i].run > 0) { slot = i; break; }
++        }
++        if (slot < 0) {
++            slot = (int)lru_next;
++            lru_next = (lru_next + 1u) % MB_LRU_SLOTS;
++            lru[slot].base = mb_base;
++            lru[slot].run  = 0;
++        }
++        if (lru[slot].run < 255) lru[slot].run++;
++
++        if (lru[slot].run == 8 && !bail) {
++            badmem_log_add_skip((uint64_t)mb_base,
++                                (uint64_t)mb_base + 0x100000);
++            bail = true;
++            lru[slot].base = 0;
++            lru[slot].run  = 0;
++        }
++    }
++    if (error_count >= 16 && !bail) {
 +        bail = true;
 +    }
 +

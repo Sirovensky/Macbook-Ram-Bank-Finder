@@ -55,4 +55,31 @@ void badmem_log_record_row(uint8_t channel, uint8_t rank,
 // No-op if UEFI Runtime Services are unavailable.
 void badmem_log_flush_rows_nvram(void);
 
+// ---------------------------------------------------------------------------
+// Skip-list (fail-safe against hardware wedge).
+//
+// When a test reports many errors in a tight PA cluster, the failing DRAM
+// cells can overwhelm the CL-H IMC or the T2 DMA monitor and hard-freeze
+// the laptop.  To stay safe we RECORD a 1 MiB skip region around the
+// failing address and exclude that region from subsequent test windows
+// via board_prune_vm_map() — the remaining tests run normally on good
+// memory and the bad region is still captured for the shim (via
+// BrrBadPages, which the shim expands +/- 1 MiB on reserve).
+//
+// Called from common_err() -> board_report_error() when an error burst
+// is detected on the same 1 MiB page.  Safe to call from any CPU under
+// error_mutex.  Dedup merges overlapping entries.
+// ---------------------------------------------------------------------------
+void badmem_log_add_skip(uint64_t start_pa, uint64_t end_pa);
+
+// Query current skip list (pointer into internal storage + count).
+// Caller must not mutate; safe to hold the pointer across calls only if
+// no new bursts are being recorded.  Used by board_prune_vm_map().
+struct badmem_skip_range { uint64_t start; uint64_t end; };
+const struct badmem_skip_range *badmem_log_skip_list(unsigned *out_count);
+
+// Count of skip regions currently recorded.  Used by pass-end summary
+// to show the user how much memory was excluded this pass.
+unsigned badmem_log_skip_count(void);
+
 #endif /* BADMEM_LOG_H */

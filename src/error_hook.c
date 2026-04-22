@@ -163,4 +163,21 @@ void board_decode_pass(void)
 
     display_scrolled_message(0, "[mem] see NVRAM BrrBadChips + BrrBadRows for decoded detail.");
     scroll();
+
+    // BRR: also surface the skip list (1 MiB regions that the burst
+    // detector excluded mid-test to keep the hardware from wedging).
+    extern unsigned badmem_log_skip_count(void);
+    extern const struct badmem_skip_range *badmem_log_skip_list(unsigned *);
+    unsigned nskip = badmem_log_skip_count();
+    if (nskip > 0) {
+        const struct badmem_skip_range *skips = badmem_log_skip_list(&nskip);
+        display_scrolled_message(0, "[skip] excluded %u 1MiB region(s) this pass:", nskip);
+        scroll();
+        for (unsigned i = 0; i < nskip; i++) {
+            display_scrolled_message(0, "  SKIP %016x - %016x",
+                                     (uintptr_t)skips[i].start,
+                                     (uintptr_t)skips[i].end);
+            scroll();
+        }
+    }
 }
