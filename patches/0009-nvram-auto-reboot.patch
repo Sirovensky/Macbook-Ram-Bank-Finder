@@ -1,6 +1,6 @@
 --- a/app/main.c
 +++ b/app/main.c
-@@ -737,6 +737,50 @@ void main(void)
+@@ -737,6 +737,55 @@ void main(void)
              extern void badmem_log_dump(void);
              if (pass_num > 0)
                  badmem_log_dump();
@@ -21,11 +21,16 @@
 +                board_decode_pass();
 +            // BRR: flush accumulated bad pages to NVRAM (no-op on BIOS or
 +            // when RT services unavailable).  Eliminates screen-photo workflow.
++            // Guard on pass_num>0 so a power-cycle during the dummy run
++            // (pass 0) cannot advance the state machine to TRIAL_PENDING
++            // based on zero errors — test must complete a real pass first.
 +            extern void badmem_log_flush_nvram(void);
-+            badmem_log_flush_nvram();
++            if (pass_num > 0)
++                badmem_log_flush_nvram();
 +            // BRR Track C: flush accumulated bad rows to BrrBadRows NVRAM.
 +            extern void badmem_log_flush_rows_nvram(void);
-+            badmem_log_flush_rows_nvram();
++            if (pass_num > 0)
++                badmem_log_flush_rows_nvram();
 +            // BRR: if Automatic mode was selected ([P]/[C] in EFI menu),
 +            // show a 30 s visible countdown so the user can read the
 +            // summary and press ESC to cancel, then auto-reboot.

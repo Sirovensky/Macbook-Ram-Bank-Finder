@@ -167,5 +167,9 @@ apply_patch 0009-nvram-auto-reboot.patch       "badmem_log_flush_nvram" "app/mai
 # T2 auto-reboot: memtest's panic handler waits for keypress that never
 # comes on A1990 (T2 blocks post-EBS keyboard).  Patch adds 60 s timer.
 apply_patch 0010-panic-auto-reboot.patch       "auto-reboot in 60 s"   "app/x86/interrupt.c"
+# T2 non-blocking scroll: upstream scroll() blocks on <Enter> if scroll_lock
+# flips ON (stray space-bar event from T2 HID proxy).  Patch short-circuits
+# the wait loop.  See patch 0011 header comment for full rationale.
+apply_patch 0011-scroll-never-block.patch      "BRR: non-blocking scroll" "app/display.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"

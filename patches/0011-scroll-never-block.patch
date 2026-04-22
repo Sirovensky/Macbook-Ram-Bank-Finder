@@ -1,0 +1,35 @@
+--- a/app/display.c
++++ b/app/display.c
+@@ -535,17 +535,24 @@ void toggle_scroll_lock(void)
+ 
+ void scroll(void)
+ {
++    // BRR: non-blocking scroll.
++    //
++    // On A1990 (T2 security chip), the post-ExitBootServices keyboard
++    // path injects phantom keypresses (vendor USB HID proxied through a
++    // path memtest's xHCI driver cannot cleanly drain).  A stray
++    // space-bar event flips scroll_lock ON via check_input(); once the
++    // message area is full, the old wait loop inside this function
++    // would block forever waiting for <Enter> — holding error_mutex via
++    // common_err's caller — and freeze the entire test: timer stops,
++    // ESC dead, test pattern text frozen on the first on-screen error.
++    //
++    // Short-circuit: advance through without waiting.  scroll_lock
++    // remains a cosmetic toggle for the config menu but no longer
++    // blocks scroll() or the error path.
+     if (scroll_message_row < ROW_SCROLL_B) {
+         scroll_message_row++;
+     } else {
+-        if (scroll_lock) {
+-            display_footer_message("<Enter> Single step     ");
+-        }
+-        scroll_wait = true;
+-        do {
+-            check_input();
+-        } while (scroll_wait && scroll_lock);
+-
++        (void)scroll_lock;
+         scroll_wait = false;
+         clear_footer_message();
+         scroll_screen_region(ROW_SCROLL_T, 0, ROW_SCROLL_B, SCREEN_WIDTH - 1);

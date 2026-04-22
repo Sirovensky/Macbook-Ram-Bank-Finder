@@ -270,13 +270,20 @@ void badmem_log_flush_nvram(void)
         scroll();
     } else {
         // SetVariable failed — NVRAM might be read-only (T2 Medium Security,
-        // or firmware locked).  Print a non-fatal warning and continue;
-        // the screen dump is still available for the manual workflow.
-        display_scrolled_message(0, "[nvram] SetVariable failed (status %x) -- use screen dump",
-                                 (unsigned)status);
+        // firmware locked, or BrrBadPages blob exceeded per-variable cap).
+        // Print a non-fatal warning and continue; the screen dump is still
+        // available for the manual workflow AND we still try to write the
+        // chip/row/state variables below (they are smaller and often succeed
+        // when BrrBadPages alone is rejected by per-var size limits).
+        //
+        // NOTE: earlier revisions returned here on the first failure, which
+        // lost BrrBadChips AND left the state machine untouched, causing the
+        // next boot's efi_menu to re-run memtest instead of chainloading
+        // the shim.  Continue through — each subsequent write is independent.
+        display_scrolled_message(0,
+            "[nvram] SetVariable BrrBadPages failed (status %x) -- continuing with smaller vars",
+            (uintptr_t)status);
         scroll();
-        // Without NVRAM writes we cannot advance the state machine.
-        return;
     }
 
     // ---------------------------------------------------------------------------
@@ -310,7 +317,7 @@ void badmem_log_flush_nvram(void)
         } else {
             display_scrolled_message(0,
                 "[nvram] WARNING: could not save BrrBadChips (status %x)",
-                (unsigned)sc);
+                (uintptr_t)sc);
             scroll();
         }
     }
@@ -337,17 +344,23 @@ void badmem_log_flush_nvram(void)
         scroll();
     } else {
         display_scrolled_message(0, "[nvram] WARNING: could not set BrrMaskState (status %x)",
-                                 (unsigned)ss);
+                                 (uintptr_t)ss);
         scroll();
     }
 
     // Delete legacy A1990* variables to complete migration (best-effort).
+    //
+    // NOTE — T2 firmware requires NV|BS|RT attributes even for a delete
+    // (size=0) call; attrs=0 is rejected with EFI_INVALID_PARAMETER and
+    // the variable stays on disk as cruft.  This was originally fixed
+    // in mask-shim / mask-install but the memtest-side legacy cleanup
+    // still passed attrs=0 and therefore silently did nothing on T2.
     set_var((efi_char16_t *)LEGACY_VARNAME_BADPAGES,
-            (efi_guid_t *)&BRR_GUID, 0, 0, 0);
+            (efi_guid_t *)&BRR_GUID, EFI_VAR_NV_BS_RT, 0, 0);
     set_var((efi_char16_t *)LEGACY_VARNAME_BADCHIPS,
-            (efi_guid_t *)&BRR_GUID, 0, 0, 0);
+            (efi_guid_t *)&BRR_GUID, EFI_VAR_NV_BS_RT, 0, 0);
     set_var((efi_char16_t *)LEGACY_VARNAME_STATE,
-            (efi_guid_t *)&BRR_GUID, 0, 0, 0);
+            (efi_guid_t *)&BRR_GUID, EFI_VAR_NV_BS_RT, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -362,13 +375,17 @@ static const efi_char16_t BRR_VARNAME_BADROWS[] = {
 #define MAX_BAD_ROWS  256
 
 // Packed tuple: ch, rank, bg, bank (1 byte each) + row (4 bytes) = 8 bytes.
-typedef struct {
+// Shim reads byte-for-byte via cfl_decode_shim.c; __attribute__((packed))
+// + _Static_assert guards against future field additions breaking the ABI.
+typedef struct __attribute__((packed)) {
     uint8_t  ch;
     uint8_t  rank;
     uint8_t  bg;
     uint8_t  bank;
     uint32_t row;
 } bad_row_t;
+_Static_assert(sizeof(bad_row_t) == 8,
+               "BrrBadRows on-disk layout must stay 8 bytes/tuple");
 
 static bad_row_t row_log[MAX_BAD_ROWS];
 static unsigned  row_count;
@@ -437,7 +454,7 @@ void badmem_log_flush_rows_nvram(void)
     } else {
         display_scrolled_message(0,
             "[nvram] WARNING: could not save BrrBadRows (status %x)",
-            (unsigned)s);
+            (uintptr_t)s);
         scroll();
     }
 }
