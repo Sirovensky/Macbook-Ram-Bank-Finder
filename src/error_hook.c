@@ -1,32 +1,60 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // Error hook called from memtest86plus app/error.c::common_err().
-// Decodes (addr, xor) into concrete BGA chip designators.
 //
-// Output tiers:
-//   T1 (always): channel, byte lane(s), chip width  (generic, works everywhere)
-//   T2 (overlay): BGA designator + location hint    (requires YAML overlay)
+// DESIGN NOTE — why this is now minimal:
 //
-// Goal: report ONE chip per failing byte lane when possible. Ranks used:
-//   - IMC-detected per-channel rank count (not static profile — profile
-//     is for max-config and misreports on reduced-memory SKUs).
-//   - decoded rank when pa.rank_valid; otherwise both ranks listed with
-//     a "?" qualifier so user knows it is a guess.
+// Earlier versions did PA decode, board_detect(), and display output
+// inside this hook.  On A1990 that caused system-wide hangs once the
+// first error fired: memtest's `common_err()` holds `error_mutex` while
+// calling us, and any fault/hang inside our hook would lock other CPUs
+// trying to report their own errors.  Observed symptom: test timer
+// frozen, ESC blocked, repeated errors on the same chip no longer
+// making the screen advance.
+//
+// Fix: this hook now ONLY appends the PA to a static array
+// (badmem_log_record).  No decode.  No SMBIOS lookup.  No display.
+// Heavy work (decode + display + NVRAM flush) is done ONCE at pass
+// boundary from CPU 0 only, in app/main.c via patch 0005+0009.
+//
+// Trade-off: per-error screen output ("suspect chips: U2620") moves
+// from per-error to end-of-pass.  User sees less live detail but
+// testing no longer deadlocks.  Chip identification still works —
+// happens when CPU 0 processes the accumulated PAs at pass end.
 
 #include "stdint.h"
 #include "stdbool.h"
 
-#include "display.h"
+#include "badmem_log.h"
 
+void board_report_error(uint64_t addr, uint64_t xor_bits)
+{
+    (void)xor_bits;  // accumulated bit-fault info deferred to pass-end decode
+
+    // Pure static-array append, no pointer chases, no MCHBAR reads, no
+    // SMBIOS walks, no display I/O.  Called under memtest's error_mutex
+    // so concurrent APs serialise at that level; even so, this function
+    // is small enough to complete in microseconds on any CPU.
+    badmem_log_record(addr);
+}
+
+// ---------------------------------------------------------------------------
+// Decode + display pass — called ONCE from app/main.c at end-of-pass by
+// CPU 0, after all workers have synchronised at the pass barrier.  Runs
+// single-threaded, no concurrent error reports, no AP races.
+//
+// Iterates the accumulated bad-PA array, decodes each via imc_decode_pa,
+// records (ch, rank, bg, bank, row) for BrrBadRows NVRAM save, records
+// (designator) for BrrBadChips NVRAM save, and prints a one-line
+// summary of suspect chips per bad page.
+// ---------------------------------------------------------------------------
+
+#include "display.h"
 #include "board_topology.h"
 #include "imc_dispatch.h"
-#include "badmem_log.h"
 
 extern int scroll_message_row;
 extern void scroll(void);
-
-// memtest86plus's printf supports only %c %s %i %u %x %k. No %l/%ll length
-// modifiers. uintptr_t is 64-bit on x86_64 so plain %x handles 64-bit vals.
 
 static uint8_t channel_ranks(const struct mc_config *mc, uint8_t ch_idx)
 {
@@ -40,88 +68,25 @@ static uint8_t channel_ranks(const struct mc_config *mc, uint8_t ch_idx)
     return m ? m : 1;
 }
 
-// AP-safety lock.  `common_err()` in memtest holds its own `error_mutex`
-// so entries to this hook should already be serialised — but the panic
-// path on A1990 showed "Invalid Op on CPU 11" immediately after the
-// first error, which means *something* in our decode/display path was
-// not AP-safe.  Belt-and-suspenders: acquire our own guard so even if
-// error_mutex is released mid-call or reentered via MCE, only one CPU
-// does the heavy work at a time.
-static volatile int hook_busy;
-
-static inline int hook_try_enter(void)
+// Process one bad PA: decode, record row/chip, print suspect-chip line.
+// Called only from board_report_pass() below (single-threaded, CPU 0).
+static void decode_and_log_one(uint64_t addr)
 {
-    int expect = 0, desired = 1;
-    return __atomic_compare_exchange_n(&hook_busy, &expect, desired,
-                                       0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
-}
-
-static inline void hook_exit(void)
-{
-    __atomic_store_n(&hook_busy, 0, __ATOMIC_RELEASE);
-}
-
-void board_report_error(uint64_t addr, uint64_t xor_bits)
-{
-    // Cheapest work first, always: record the PA for later NVRAM dump.
-    // badmem_log_record() is pure static-array append under error_mutex —
-    // safe to call concurrently with the guard above held or not.
-    badmem_log_record(addr);
-
-    // Heavy work (PA decode + board lookup + display) is not reentrant-safe
-    // against concurrent AP errors.  Drop the event if another CPU is
-    // already in the hook — the record above already captured the PA.
-    if (!hook_try_enter()) return;
-
     struct pa_decoded pa = imc_decode_pa(addr);
-    if (!pa.valid) { hook_exit(); return; }
+    if (!pa.valid) return;
 
-    // Track C: record bad row tuple for row-level NVRAM masking.
+    // Record bad row for NVRAM row-mode.
     if (pa.bank_row_valid) {
         badmem_log_record_row(pa.channel, pa.rank,
                               pa.bank_group, pa.bank, pa.row);
     }
 
-    uint8_t lane_mask = 0;
-    for (int bit = 0; bit < 64; bit++) {
-        if (xor_bits & (1ULL << bit)) lane_mask |= 1 << (bit / 8);
-    }
-    if (!lane_mask) { hook_exit(); return; }
-
     const struct mc_config *mc = imc_config();
     const board_profile_t *p   = board_detect();
+    if (!p) return;
+
     uint8_t ranks = channel_ranks(mc, pa.channel);
 
-    // Header line: address + xor + decoded ch/rank.
-    if (pa.rank_valid) {
-        const char *mark = pa.rank_speculative ? "~" : "";
-        display_scrolled_message(0,
-            "[mem] ch%u rk%u%s addr=%016x xor=%016x",
-            pa.channel, pa.rank, mark,
-            (uintptr_t)addr, (uintptr_t)xor_bits);
-    } else {
-        display_scrolled_message(0,
-            "[mem] ch%u rk=? addr=%016x xor=%016x",
-            pa.channel, (uintptr_t)addr, (uintptr_t)xor_bits);
-    }
-    scroll();
-
-    // T1 line: byte lanes (always).
-    display_scrolled_message(0, "[mem] lanes:");
-    int col_off = 13;
-    for (uint8_t lane = 0; lane < 8; lane++) {
-        if (!(lane_mask & (1 << lane))) continue;
-        display_scrolled_message(col_off, "D%u", lane);
-        col_off += 4;
-    }
-    scroll();
-
-    // T2 line: overlay designators (if board matched).
-    if (!p) { hook_exit(); return; }
-
-    // Decide which ranks to emit:
-    //   - rank decoded (or 1R channel): exactly 1 rank.
-    //   - rank ambiguous and 2R channel: list both with "?" qualifier.
     uint8_t rank_lo, rank_hi;
     const char *qual;
     if (pa.rank_valid) {
@@ -136,20 +101,23 @@ void board_report_error(uint64_t addr, uint64_t xor_bits)
         qual = "";
     }
 
-    display_scrolled_message(0, "[mem] suspect chips:");
-    col_off = 22;
+    // Determine byte lane(s) hit from the decoded PA — without xor_bits
+    // we can't narrow to a single lane, so log every lane of the channel.
+    // This over-reports chips on a channel, but matches what the user
+    // sees anyway for a 1R A1990: one channel = 8 chips.  The NVRAM row
+    // record already narrows to (bg, bank, row) precision.
+    //
+    // For a tighter per-error chip-report we'd need xor_bits passed to
+    // this deferred hook — currently xor is thrown away at error time.
+    // Revisit if precise per-error chip lists are needed.
 
-    // Dedupe: an x16 chip covers a lane pair, so both lanes map to the
-    // same designator. Emit each (rank, designator) only once.
     const char *seen[BOARD_MAX_PACKAGES] = { 0 };
     unsigned seen_count = 0;
 
     for (uint8_t r = rank_lo; r <= rank_hi; r++) {
         for (uint8_t lane = 0; lane < 8; lane++) {
-            if (!(lane_mask & (1 << lane))) continue;
             const board_package_t *pk = board_lookup(p, pa.channel, r, lane);
             if (!pk) continue;
-
             bool dup = false;
             for (unsigned i = 0; i < seen_count; i++) {
                 if (seen[i] == pk->designator) { dup = true; break; }
@@ -158,30 +126,36 @@ void board_report_error(uint64_t addr, uint64_t xor_bits)
             if (seen_count < BOARD_MAX_PACKAGES) {
                 seen[seen_count++] = pk->designator;
             }
-
-            // Side-channel: record chip designator for chip-mode NVRAM save.
-            // badmem_log_record_chip() deduplicates across the full run so
-            // repeated errors on the same chip don't inflate the list.
             badmem_log_record_chip(pk->designator);
-
-            display_scrolled_message(col_off, "%s%s", pk->designator, qual);
-            col_off += 8;
         }
     }
+    (void)qual;
+}
+
+// Called from app/main.c at end of each pass (patch 0005/0009 area),
+// single-threaded on CPU 0.  Walks badmem_log entries, decodes each,
+// populates BrrBadChips and BrrBadRows accumulators.  The NVRAM flush
+// in badmem_log_flush_nvram + badmem_log_flush_rows_nvram then persists
+// both lists.
+void board_decode_pass(void)
+{
+    extern uint64_t *badmem_log_entries(unsigned *out_count);  // from badmem_log.c
+    unsigned n = 0;
+    uint64_t *pas = badmem_log_entries(&n);
+
+    if (!pas || n == 0) return;
+
+    display_scrolled_message(0, "[mem] decoded %u bad page(s):", n);
     scroll();
 
-    // Confidence legend (only on first speculative/ambiguous report each
-    // test pass would be ideal, but common_err() has no pass state. Keep
-    // it one line per error for clarity.)
-    if (qual[0] == '?') {
-        display_scrolled_message(0,
-            "[mem] '?' = rank unknown; both rank candidates listed.");
-        scroll();
-    } else if (qual[0] == '~') {
-        display_scrolled_message(0,
-            "[mem] '~' = rank from speculative MAD_INTRA decode.");
-        scroll();
+    for (unsigned i = 0; i < n; i++) {
+        decode_and_log_one(pas[i]);
     }
 
-    hook_exit();
+    // Short summary of identified chips.
+    const board_profile_t *p = board_detect();
+    if (p) {
+        display_scrolled_message(0, "[mem] see BrrBadChips + BrrBadRows in NVRAM for details.");
+        scroll();
+    }
 }

@@ -1,9 +1,16 @@
 --- a/app/main.c
 +++ b/app/main.c
-@@ -737,6 +737,27 @@ void main(void)
+@@ -737,6 +737,34 @@ void main(void)
              extern void badmem_log_dump(void);
              if (pass_num > 0)
                  badmem_log_dump();
++            // BRR: single-threaded deferred decode of bad PAs captured
++            // during the pass.  error_hook only records PA (fast, AP-safe);
++            // decode + board-lookup + per-chip NVRAM writes happen here
++            // once per pass from CPU 0 only.
++            extern void board_decode_pass(void);
++            if (pass_num > 0)
++                board_decode_pass();
 +            // BRR: flush accumulated bad pages to NVRAM (no-op on BIOS or
 +            // when RT services unavailable).  Eliminates screen-photo workflow.
 +            extern void badmem_log_flush_nvram(void);

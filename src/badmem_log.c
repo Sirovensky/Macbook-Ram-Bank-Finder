@@ -97,6 +97,21 @@ typedef struct {
 static uint64_t log_pages[MAX_ENTRIES];
 static unsigned log_count;
 
+// Accessor for error_hook.c's board_decode_pass() — returns internal
+// array pointer + count.  Caller must not mutate.  Single-threaded access
+// expected at pass boundary (no locking).
+uint64_t *badmem_log_entries(unsigned *out_count)
+{
+    if (out_count) *out_count = log_count;
+    return log_pages;
+}
+
+// Current count of logged bad pages, for auto-bail threshold checks.
+unsigned badmem_log_count(void)
+{
+    return log_count;
+}
+
 // ---------------------------------------------------------------------------
 // Chip designator accumulator.
 //
