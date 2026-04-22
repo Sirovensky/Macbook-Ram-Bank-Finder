@@ -36,6 +36,48 @@ static uint32_t read_brr_flags(void)
     return ((const boot_params_t *)boot_params_addr)->brr_flags;
 }
 
+// Look for a token in the kernel cmdline with simple substring match.
+// Good enough for our known cmdline keywords (no false-positives in
+// practice because grub passes them on a single whitespace-separated
+// line and we only search for fixed strings that don't appear
+// anywhere else).
+static int cmdline_contains(const char *needle)
+{
+    if (boot_params_addr == 0) return 0;
+    const boot_params_t *bp = (const boot_params_t *)boot_params_addr;
+    if (bp->cmd_line_ptr == 0) return 0;
+    const char *hay = (const char *)(uintptr_t)bp->cmd_line_ptr;
+    for (const char *p = hay; *p; p++) {
+        const char *a = p, *b = needle;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+// BRR debug: `brr_fast` in cmdline narrows the test list to the 3
+// most informative fast tests — walking-ones addr (catches stuck bits),
+// moving-inversions 1s/0s (classic), and moving-inversions random
+// (catches bit-interference).  Cuts pass runtime from ~30-60 min to
+// ~5-10 min on 32 GiB.  For iteration during development only.
+//
+// Declared via tests.h (test_pattern_t + NUM_TEST_PATTERNS).
+#include "tests.h"
+static void apply_test_filter(void)
+{
+    if (!cmdline_contains("brr_fast")) return;
+
+    // Enable only tests 0, 3, 5.  Everything else disabled.
+    static const int keep[] = { 0, 3, 5 };
+    for (int i = 0; i < NUM_TEST_PATTERNS; i++) {
+        int k = 0;
+        for (unsigned j = 0; j < sizeof(keep)/sizeof(keep[0]); j++) {
+            if (keep[j] == i) { k = 1; break; }
+        }
+        test_list[i].enabled = k;
+    }
+}
+
 extern void sleep(unsigned int sec);
 
 #define PAUSE_SECONDS 5
@@ -68,6 +110,10 @@ static void countdown(const char *tag, unsigned seconds)
 void board_calibrate(void)
 {
     int r;
+
+    // BRR debug: apply cmdline test-list filter BEFORE dummy_run starts.
+    // Runs only 3 tests if `brr_fast` is in the kernel cmdline.
+    apply_test_filter();
 
     // Phase 0 — capture any prior memtest boot output. Don't clear.
     // Just show a fixed countdown in the footer region so the user can
