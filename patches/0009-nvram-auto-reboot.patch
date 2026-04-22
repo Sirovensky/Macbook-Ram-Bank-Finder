@@ -1,9 +1,17 @@
 --- a/app/main.c
 +++ b/app/main.c
-@@ -737,6 +737,34 @@ void main(void)
+@@ -737,6 +737,50 @@ void main(void)
              extern void badmem_log_dump(void);
              if (pass_num > 0)
                  badmem_log_dump();
++            // BRR: force scroll_lock OFF before any pass-end prints.
++            // T2 keyboards can inject stray keypresses (space-bar toggles
++            // scroll_lock); if scroll_lock is ON and the message area is
++            // full, scroll() blocks inside a check_input() wait loop.
++            // At pass end we own the screen; force-clear the lock so our
++            // summary + countdown never block.
++            extern void set_scroll_lock(bool);
++            set_scroll_lock(false);
 +            // BRR: single-threaded deferred decode of bad PAs captured
 +            // during the pass.  error_hook only records PA (fast, AP-safe);
 +            // decode + board-lookup + per-chip NVRAM writes happen here
@@ -18,16 +26,24 @@
 +            // BRR Track C: flush accumulated bad rows to BrrBadRows NVRAM.
 +            extern void badmem_log_flush_rows_nvram(void);
 +            badmem_log_flush_rows_nvram();
-+            // BRR: if Automatic mode was selected ([P]/[C] in EFI menu), wait
-+            // 5 s so the NVRAM save result is visible, then reboot.
++            // BRR: if Automatic mode was selected ([P]/[C] in EFI menu),
++            // show a 30 s visible countdown so the user can read the
++            // summary and press ESC to cancel, then auto-reboot.
 +            // BRR_FLAG_AUTO_REBOOT_AFTER_PASS == bit 2 == (1u << 2).
 +            {
 +                boot_params_t *bp = (boot_params_t *)boot_params_addr;
 +                if (bp->brr_flags & (1u << 2)) {
-+                    display_scrolled_message(0, "[auto] pass complete, rebooting in 5 s");
 +                    extern void scroll(void);
++                    extern void check_input(void);
++                    display_scrolled_message(0, "[auto] pass complete. ESC to cancel auto-reboot.");
 +                    scroll();
-+                    usleep(5000000);
++                    for (int s = 30; s > 0; s--) {
++                        display_scrolled_message(0, "[auto] rebooting in %2d s ...", s);
++                        for (int k = 0; k < 10; k++) {
++                            usleep(100000);  // 100 ms
++                            check_input();   // ESC -> reboot() immediately
++                        }
++                    }
 +                    extern void reboot(void);
 +                    reboot();
 +                }
