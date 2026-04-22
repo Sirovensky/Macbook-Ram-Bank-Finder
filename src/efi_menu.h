@@ -56,6 +56,10 @@
  *
  * Call this BEFORE set_efi_info_and_exit_boot_services().
  */
-uint32_t efi_menu(void *sys_table, void *image_handle);
+/* cmdline is a pointer to the ASCII boot argument string (may be NULL).
+ * If it contains "brr_auto_page" or "brr_auto_chip", the menu is skipped
+ * and the corresponding TRIAL flags are returned automatically so grub
+ * can drive a fully unattended detect+mask pass. */
+uint32_t efi_menu(void *sys_table, void *image_handle, const char *cmdline);
 
 #endif /* EFI_MENU_H */

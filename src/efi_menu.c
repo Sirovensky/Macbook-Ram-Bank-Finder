@@ -486,7 +486,19 @@ static uint32_t check_nvram_state(efi_handle_t image_handle)
 // Public entry point
 // ---------------------------------------------------------------------------
 
-uint32_t efi_menu(void *sys_table_arg, void *image_handle_arg)
+// Case-sensitive substring search — stdlib unavailable.
+static int cmdline_has(const char *hay, const char *needle)
+{
+    if (!hay || !needle) return 0;
+    for (const char *p = hay; *p; p++) {
+        const char *a = p, *b = needle;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+uint32_t efi_menu(void *sys_table_arg, void *image_handle_arg, const char *cmdline)
 {
     efi_system_table_t *st = (efi_system_table_t *)sys_table_arg;
     efi_handle_t image_handle = (efi_handle_t)image_handle_arg;
@@ -498,6 +510,40 @@ uint32_t efi_menu(void *sys_table_arg, void *image_handle_arg)
     g_rs      = st->runtime_services;
 
     if (!g_con_out || !g_con_in || !g_bs) return 0;
+
+    // ---------------------------------------------------------------------------
+    // Grub unattended mode: `brr_auto_page` or `brr_auto_chip` in the
+    // kernel cmdline forces the corresponding automatic-trial flags and
+    // skips the interactive menu entirely.  This is how grub entry 1
+    // drives the full detect → trial → permanent flow without needing
+    // the user to press any keys during the first boot.  NVRAM state
+    // machine still takes over on subsequent boots (TRIAL_PENDING →
+    // chainload shim, TRIAL_BOOTED → Y/Y prompt which DOES require
+    // keyboard input — ConIn works at that point because we're still
+    // pre-ExitBootServices).
+    // ---------------------------------------------------------------------------
+    if (cmdline_has(cmdline, "brr_auto_page")) {
+        con_puts("\r\n  [auto] brr_auto_page in cmdline -> page-mask mode\r\n\r\n");
+        // Still run decoder self-test so page-mode is optionally upgraded
+        // to row-mode by the shim.  Skip if NVRAM state already set.
+        {
+            char probe[64] = {0};
+            if (read_state(probe, sizeof(probe) - 1) == 0)
+                decoder_selftest_run(st);
+        }
+        return BRR_FLAG_SKIP_COUNTDOWNS | BRR_FLAG_AUTO_REBOOT_AFTER_PASS
+             | BRR_FLAG_TRIAL_PAGE;
+    }
+    if (cmdline_has(cmdline, "brr_auto_chip")) {
+        con_puts("\r\n  [auto] brr_auto_chip in cmdline -> chip-mask mode\r\n\r\n");
+        {
+            char probe[64] = {0};
+            if (read_state(probe, sizeof(probe) - 1) == 0)
+                decoder_selftest_run(st);
+        }
+        return BRR_FLAG_SKIP_COUNTDOWNS | BRR_FLAG_AUTO_REBOOT_AFTER_PASS
+             | BRR_FLAG_AUTO_TRIAL_CHIP | BRR_FLAG_TRIAL_CHIP;
+    }
 
     // ---------------------------------------------------------------------------
     // Track B: Decoder self-test.

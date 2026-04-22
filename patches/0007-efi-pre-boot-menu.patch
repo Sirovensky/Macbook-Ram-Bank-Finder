@@ -9,7 +9,7 @@
 
  //------------------------------------------------------------------------------
  // Constants
-@@ -787,6 +789,13 @@ boot_params_t *efi_setup(efi_handle_t handle, efi_system_table_t *sys_table_arg
+@@ -787,6 +789,14 @@ boot_params_t *efi_setup(efi_handle_t handle, efi_system_table_t *sys_table_arg
 
      parse_cmd_line(boot_params->cmd_line_ptr, boot_params->cmd_line_size);
 
@@ -18,7 +18,8 @@
 +    // that memtest's xHCI stack cannot reach post-ExitBootServices.  ConIn is
 +    // the only reliable input path; it becomes unavailable after the call below.
 +    // Store the chosen flags so the application can honour them later.
-+    boot_params->brr_flags = efi_menu(sys_table, handle);
++    boot_params->brr_flags = efi_menu(sys_table, handle,
++                                      (const char *)(uintptr_t)boot_params->cmd_line_ptr);
 +
      status = set_screen_info(boot_params);
      if (status != EFI_SUCCESS) {

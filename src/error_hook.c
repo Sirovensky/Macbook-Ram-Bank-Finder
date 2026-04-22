@@ -25,17 +25,42 @@
 #include "stdint.h"
 #include "stdbool.h"
 
+#include "display.h"
 #include "badmem_log.h"
+
+extern void scroll(void);
+
+// Minimal per-error display guard — use CAS so concurrent APs don't stall
+// each other.  First CPU to enter prints; others drop immediately.
+static volatile int hook_disp_busy;
+
+static inline int disp_try_enter(void)
+{
+    int expect = 0, desired = 1;
+    return __atomic_compare_exchange_n(&hook_disp_busy, &expect, desired,
+                                       0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+static inline void disp_exit(void)
+{
+    __atomic_store_n(&hook_disp_busy, 0, __ATOMIC_RELEASE);
+}
 
 void board_report_error(uint64_t addr, uint64_t xor_bits)
 {
-    (void)xor_bits;  // accumulated bit-fault info deferred to pass-end decode
-
-    // Pure static-array append, no pointer chases, no MCHBAR reads, no
-    // SMBIOS walks, no display I/O.  Called under memtest's error_mutex
-    // so concurrent APs serialise at that level; even so, this function
-    // is small enough to complete in microseconds on any CPU.
+    // Step 1 — always: fast static-array append for deferred decode.
+    // No pointer chases, no MCHBAR reads, no SMBIOS, no allocations.
     badmem_log_record(addr);
+
+    // Step 2 — opportunistic: minimal 1-line display showing PA + xor.
+    // Skipped if another CPU is already in the display section (CAS guard).
+    // No board_detect / no imc_decode_pa / no board_lookup — those live in
+    // board_decode_pass() which runs single-threaded at pass end.
+    if (disp_try_enter()) {
+        display_scrolled_message(0, "[mem] err addr=%016x xor=%016x",
+                                 (uintptr_t)addr, (uintptr_t)xor_bits);
+        scroll();
+        disp_exit();
+    }
 }
 
 // ---------------------------------------------------------------------------
