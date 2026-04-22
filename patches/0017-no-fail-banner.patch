@@ -1,0 +1,17 @@
+--- a/app/display.c
++++ b/app/display.c
+@@ -443,6 +443,14 @@ void display_temperature(void)
+ 
+ void display_big_status(bool pass)
+ {
++    // BRR: suppress the FAIL banner on A1990.  Post-ExitBootServices
++    // the T2 keyboard is unreachable, so the "Press any key to remove
++    // this banner" prompt is a trap — the overlay stays up and covers
++    // the end-of-pass summary, skip list, NVRAM save messages, and
++    // the 30 s auto-reboot countdown (all of which still fire behind
++    // the banner, but the user cannot see them).  PASS banner is
++    // kept because it's useful signal on a clean run.
++    if (!pass) return;
+     if (!enable_big_status || big_status_displayed) {
+         return;
+     }

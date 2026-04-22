@@ -192,6 +192,9 @@ apply_patch 0015-vm-map-prune-hook.patch "board_prune_vm_map" "app/main.c"
 # Pass-progress bar: switch from tick-ratio (breaks when prune splits
 # vm_map entries) to completed-test-count metric.  Bounded at 100%
 # by definition.
-apply_patch 0016-pass-progress-test-count.patch "BRR: pass progress based on" "app/display.c"
+apply_patch 0016-pass-progress-test-count.patch "BRR: pass% = completed tests" "app/display.c"
+# Suppress FAIL banner on A1990 (T2 keyboard can't dismiss it; overlay
+# covers end-of-pass summary + NVRAM messages + auto-reboot countdown).
+apply_patch 0017-no-fail-banner.patch "BRR: suppress the FAIL banner" "app/display.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"

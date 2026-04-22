@@ -1,58 +1,76 @@
 --- a/app/main.c
 +++ b/app/main.c
-@@ -737,6 +737,55 @@ void main(void)
+@@ -733,6 +733,72 @@ void main(void)
              extern void badmem_log_dump(void);
              if (pass_num > 0)
                  badmem_log_dump();
-+            // BRR: force scroll_lock OFF before any pass-end prints.
-+            // T2 keyboards can inject stray keypresses (space-bar toggles
-+            // scroll_lock); if scroll_lock is ON and the message area is
-+            // full, scroll() blocks inside a check_input() wait loop.
-+            // At pass end we own the screen; force-clear the lock so our
-+            // summary + countdown never block.
++            // BRR: force scroll_lock OFF so pass-end prints never wait.
 +            extern void set_scroll_lock(bool);
 +            set_scroll_lock(false);
 +            // BRR: single-threaded deferred decode of bad PAs captured
-+            // during the pass.  error_hook only records PA (fast, AP-safe);
-+            // decode + board-lookup + per-chip NVRAM writes happen here
-+            // once per pass from CPU 0 only.
++            // during the pass (error_hook only records PA fast+AP-safe).
 +            extern void board_decode_pass(void);
 +            if (pass_num > 0)
 +                board_decode_pass();
-+            // BRR: flush accumulated bad pages to NVRAM (no-op on BIOS or
-+            // when RT services unavailable).  Eliminates screen-photo workflow.
-+            // Guard on pass_num>0 so a power-cycle during the dummy run
-+            // (pass 0) cannot advance the state machine to TRIAL_PENDING
-+            // based on zero errors — test must complete a real pass first.
++            // BRR: flush accumulated bad pages to NVRAM as BrrBadPages.
 +            extern void badmem_log_flush_nvram(void);
 +            if (pass_num > 0)
 +                badmem_log_flush_nvram();
-+            // BRR Track C: flush accumulated bad rows to BrrBadRows NVRAM.
++            // BRR: flush accumulated bad rows to BrrBadRows.
 +            extern void badmem_log_flush_rows_nvram(void);
 +            if (pass_num > 0)
 +                badmem_log_flush_rows_nvram();
-+            // BRR: if Automatic mode was selected ([P]/[C] in EFI menu),
-+            // show a 30 s visible countdown so the user can read the
-+            // summary and press ESC to cancel, then auto-reboot.
-+            // BRR_FLAG_AUTO_REBOOT_AFTER_PASS == bit 2 == (1u << 2).
++            // BRR: auto-reboot + HALT.  Never continue to pass 2 after
++            // a real pass with errors -- would clobber NVRAM state
++            // the mask-shim needs on next boot.
 +            {
 +                boot_params_t *bp = (boot_params_t *)boot_params_addr;
-+                if (bp->brr_flags & (1u << 2)) {
-+                    extern void scroll(void);
-+                    extern void check_input(void);
-+                    display_scrolled_message(0, "[auto] pass complete. ESC to cancel auto-reboot.");
++                extern unsigned badmem_log_count(void);
++                extern void scroll(void);
++                extern void check_input(void);
++                extern void reboot(void);
++
++                bool auto_reboot = (bp->brr_flags & (1u << 2)) != 0;
++                bool had_errors  = (pass_num > 0) && (badmem_log_count() > 0);
++
++                if (auto_reboot) {
++                    display_scrolled_message(0, "[auto] pass complete. Auto-reboot in 30s. ESC to reboot now.");
 +                    scroll();
 +                    for (int s = 30; s > 0; s--) {
 +                        display_scrolled_message(0, "[auto] rebooting in %2d s ...", s);
 +                        for (int k = 0; k < 10; k++) {
-+                            usleep(100000);  // 100 ms
-+                            check_input();   // ESC -> reboot() immediately
++                            usleep(100000);
++                            check_input();
 +                        }
 +                    }
-+                    extern void reboot(void);
 +                    reboot();
++                    // reboot() should not return.  On T2 it sometimes
++                    // does (cf9 reset treated as shutdown / firmware
++                    // blocks ResetSystem post-EBS).  HALT rather than
++                    // fall into pass 2 which would clobber NVRAM.
++                    display_scrolled_message(0, "");
++                    scroll();
++                    display_scrolled_message(0, "*** REBOOT FAILED ***");
++                    scroll();
++                    display_scrolled_message(0, "T2 firmware rejected ResetSystem / port-cf9 reset.");
++                    scroll();
++                    display_scrolled_message(0, "NVRAM state IS written -- safe to force power cycle.");
++                    scroll();
++                    display_scrolled_message(0, "Hold power 10 s, then press power to boot USB again.");
++                    scroll();
++                    display_scrolled_message(0, "Next USB boot: mask-shim applies mask and loads macOS.");
++                    scroll();
++                    while (1) { __asm__ __volatile__("cli; hlt"); }
++                }
++                if (had_errors) {
++                    display_scrolled_message(0, "[auto] pass done with errors -- halting.");
++                    scroll();
++                    display_scrolled_message(0, "NVRAM state written. Hold power 10 s, boot USB again for shim.");
++                    scroll();
++                    while (1) { __asm__ __volatile__("cli; hlt"); }
 +                }
 +            }
              if (error_count == 0) {
                  display_status("Pass   ");
                  display_big_status(true);
+
