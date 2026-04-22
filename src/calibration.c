@@ -37,20 +37,39 @@ static uint32_t read_brr_flags(void)
 }
 
 // Look for a token in the kernel cmdline with simple substring match.
-// Good enough for our known cmdline keywords (no false-positives in
-// practice because grub passes them on a single whitespace-separated
-// line and we only search for fixed strings that don't appear
-// anywhere else).
+//
+// IMPORTANT: memtest's own parse_command_line() (app/config.c) runs
+// BEFORE board_calibrate() and REPLACES every space with '\0' in the
+// cmdline buffer.  So by the time we look, the buffer is NUL-separated
+// tokens (one option per run of bytes), not a single space-separated
+// string.  A naive "scan until *p" stops at the first NUL and never
+// sees tokens beyond BOOT_IMAGE=/path.
+//
+// We iterate up to cmd_line_size instead of first-NUL, treating any
+// byte sequence (including embedded NULs) as the search domain.
+// Good enough for our needle set (brr_fast, brr_auto_page, brr_auto_chip)
+// which all start with a unique "brr_" prefix and appear as their own
+// tokens with no substring collisions against BOOT_IMAGE paths.
 static int cmdline_contains(const char *needle)
 {
     if (boot_params_addr == 0) return 0;
     const boot_params_t *bp = (const boot_params_t *)boot_params_addr;
     if (bp->cmd_line_ptr == 0) return 0;
     const char *hay = (const char *)(uintptr_t)bp->cmd_line_ptr;
-    for (const char *p = hay; *p; p++) {
-        const char *a = p, *b = needle;
-        while (*a && *b && *a == *b) { a++; b++; }
-        if (!*b) return 1;
+
+    unsigned nlen = 0;
+    while (needle[nlen]) nlen++;
+    if (nlen == 0) return 0;
+
+    unsigned hlen = bp->cmd_line_size;
+    if (hlen == 0 || hlen > 4096) hlen = 4096;  // safety cap
+
+    if (nlen > hlen) return 0;
+
+    for (unsigned i = 0; i + nlen <= hlen; i++) {
+        unsigned j = 0;
+        while (j < nlen && hay[i + j] == needle[j]) j++;
+        if (j == nlen) return 1;
     }
     return 0;
 }
@@ -122,16 +141,27 @@ void board_calibrate(void)
     int r;
 
     // BRR debug: echo the kernel cmdline so the user can confirm grub
-    // actually passed what they expected.  First 70 chars only, so it
-    // fits one scroll row.
+    // actually passed what they expected.
+    //
+    // Note: memtest's parse_command_line() ran before us and replaced
+    // every ' ' with '\0' in the buffer (tokenisation in place).  We
+    // iterate up to cmd_line_size and substitute NULs back to spaces
+    // in a local copy so the printed line is legible again.
     if (boot_params_addr != 0) {
         const boot_params_t *bp = (const boot_params_t *)boot_params_addr;
-        if (bp->cmd_line_ptr != 0) {
+        if (bp->cmd_line_ptr != 0 && bp->cmd_line_size > 0) {
             const char *cmd = (const char *)(uintptr_t)bp->cmd_line_ptr;
             char buf[72];
-            unsigned j = 0;
-            while (j < sizeof(buf) - 1 && cmd[j]) { buf[j] = cmd[j]; j++; }
-            buf[j] = 0;
+            unsigned cap = sizeof(buf) - 1;
+            unsigned sz  = bp->cmd_line_size;
+            if (sz > cap) sz = cap;
+            for (unsigned j = 0; j < sz; j++) {
+                char c = cmd[j];
+                buf[j] = (c == '\0') ? ' ' : c;
+            }
+            buf[sz] = 0;
+            // Trim trailing spaces.
+            while (sz > 0 && buf[sz - 1] == ' ') { buf[--sz] = 0; }
             display_scrolled_message(0, "[brr] cmdline: %s", (uintptr_t)buf);
             scroll();
         } else {
