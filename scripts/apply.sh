@@ -189,5 +189,9 @@ apply_patch 0013-early-bail-on-many-errors.patch "BRR: fail-safe error-burst det
 # Hook board_prune_vm_map() into setup_vm_map() so each new window is
 # pruned against the accumulated skip list before tests run on it.
 apply_patch 0015-vm-map-prune-hook.patch "board_prune_vm_map" "app/main.c"
+# Pass-progress bar: switch from tick-ratio (breaks when prune splits
+# vm_map entries) to completed-test-count metric.  Bounded at 100%
+# by definition.
+apply_patch 0016-pass-progress-test-count.patch "BRR: pass progress based on" "app/display.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"

@@ -1,33 +1,28 @@
 --- a/app/error.c
 +++ b/app/error.c
-@@ -165,6 +165,67 @@ static void common_err(error_type_t type, uintptr_t addr, testword_t good, testw
- 
-     testword_t xor = good ^ bad;
- 
-+    // BRR: fail-safe error-burst detector (runs under error_mutex —
-+    // all state here is single-writer, no atomics needed).
+@@ -168,6 +168,59 @@ static void common_err(error_type_t type, uintptr_t addr, testword_t good, testw
+     extern void board_report_error(uint64_t addr, uint64_t xor_bits);
+     if (type == DATA_ERROR || type == ADDR_ERROR) board_report_error((uint64_t)addr, (uint64_t)xor);
+
++    // BRR: fail-safe error-burst detector (under error_mutex — no atomics).
 +    //
-+    // On A1990 (CL-H IMC + T2) a test hitting bad DRAM cells wedges
-+    // the hardware after ~150-200 errors: timer stops, all CPUs dead.
-+    // We act on two signals WELL BELOW that threshold:
++    // The error has ALREADY been recorded above (board_report_error ->
++    // badmem_log_record).  This block ONLY decides whether to flip the
++    // global `bail` flag and whether to append a 1 MiB skip range; it
++    // never short-circuits recording or the display path below.
 +    //
-+    //   (a) 8 errors inside a single 1 MiB page -> record that 1 MiB
-+    //       as a skip range.  Subsequent test windows prune it from
-+    //       vm_map (see system/board/skip.c::board_prune_vm_map) and
-+    //       never touch it again.  Flip `bail` so the current test
-+    //       returns immediately.  Decoder identifies the bad chip
-+    //       from 1 error; 8 is a confidence margin.
++    //   (a) 8 errors inside a single 1 MiB page -> add that 1 MiB as
++    //       a skip range (excluded from subsequent test windows via
++    //       board_prune_vm_map) and flip `bail` so the current test
++    //       returns at its next BAILOUT.  Decoder identifies the bad
++    //       chip from 1 error; 8 is a confidence margin well below
++    //       the ~150 error wedge threshold.
++    //   (b) 16 total errors this pass -> flip `bail` regardless;
++    //       catches whole-chip failures whose errors scatter across
++    //       many 1 MiB pages.
 +    //
-+    //   (b) 16 total errors this pass -> flip `bail` regardless.
-+    //       Catches whole-chip failures whose errors scatter across
-+    //       many 1 MiB pages before any single page reaches 8.
-+    //
-+    // HARDENING FOR HIGH ERROR RATE: test 7 block_move produces errors
-+    // as fast as the IMC can drain them.  If two CPUs both hit bad
-+    // cells in DIFFERENT 1 MiB regions and their errors interleave, a
-+    // single last-MB counter would keep resetting and never reach 8.
-+    // We carry a 4-slot LRU cache of recent MB bases so up to four
-+    // concurrent bad regions each build their own run count.
++    // Hardening for high error rate: 4-slot LRU of recent MB bases so
++    // interleaved bursts from multiple CPUs each build their own run.
 +    extern bool bail;
 +    extern void badmem_log_add_skip(uint64_t start_pa, uint64_t end_pa);
 +
@@ -61,9 +56,6 @@
 +    if (error_count >= 16 && !bail) {
 +        bail = true;
 +    }
-+
-+    extern void board_report_error(uint64_t addr, uint64_t xor_bits);
-+    if (type == DATA_ERROR || type == ADDR_ERROR) board_report_error((uint64_t)addr, (uint64_t)xor);
 +
      bool new_stats = false;
      testword_t page   = page_of((void *)addr);
