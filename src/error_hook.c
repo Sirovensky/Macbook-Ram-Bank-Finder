@@ -40,14 +40,41 @@ static uint8_t channel_ranks(const struct mc_config *mc, uint8_t ch_idx)
     return m ? m : 1;
 }
 
+// AP-safety lock.  `common_err()` in memtest holds its own `error_mutex`
+// so entries to this hook should already be serialised — but the panic
+// path on A1990 showed "Invalid Op on CPU 11" immediately after the
+// first error, which means *something* in our decode/display path was
+// not AP-safe.  Belt-and-suspenders: acquire our own guard so even if
+// error_mutex is released mid-call or reentered via MCE, only one CPU
+// does the heavy work at a time.
+static volatile int hook_busy;
+
+static inline int hook_try_enter(void)
+{
+    int expect = 0, desired = 1;
+    return __atomic_compare_exchange_n(&hook_busy, &expect, desired,
+                                       0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+static inline void hook_exit(void)
+{
+    __atomic_store_n(&hook_busy, 0, __ATOMIC_RELEASE);
+}
+
 void board_report_error(uint64_t addr, uint64_t xor_bits)
 {
-    // Accumulate for badmem.txt dump at end of run (always, regardless of
-    // whether the full topology decode succeeds).
+    // Cheapest work first, always: record the PA for later NVRAM dump.
+    // badmem_log_record() is pure static-array append under error_mutex —
+    // safe to call concurrently with the guard above held or not.
     badmem_log_record(addr);
 
+    // Heavy work (PA decode + board lookup + display) is not reentrant-safe
+    // against concurrent AP errors.  Drop the event if another CPU is
+    // already in the hook — the record above already captured the PA.
+    if (!hook_try_enter()) return;
+
     struct pa_decoded pa = imc_decode_pa(addr);
-    if (!pa.valid) return;
+    if (!pa.valid) { hook_exit(); return; }
 
     // Track C: record bad row tuple for row-level NVRAM masking.
     if (pa.bank_row_valid) {
@@ -59,7 +86,7 @@ void board_report_error(uint64_t addr, uint64_t xor_bits)
     for (int bit = 0; bit < 64; bit++) {
         if (xor_bits & (1ULL << bit)) lane_mask |= 1 << (bit / 8);
     }
-    if (!lane_mask) return;
+    if (!lane_mask) { hook_exit(); return; }
 
     const struct mc_config *mc = imc_config();
     const board_profile_t *p   = board_detect();
@@ -90,7 +117,7 @@ void board_report_error(uint64_t addr, uint64_t xor_bits)
     scroll();
 
     // T2 line: overlay designators (if board matched).
-    if (!p) return;
+    if (!p) { hook_exit(); return; }
 
     // Decide which ranks to emit:
     //   - rank decoded (or 1R channel): exactly 1 rank.
@@ -155,4 +182,6 @@ void board_report_error(uint64_t addr, uint64_t xor_bits)
             "[mem] '~' = rank from speculative MAD_INTRA decode.");
         scroll();
     }
+
+    hook_exit();
 }

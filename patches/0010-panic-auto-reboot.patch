@@ -1,0 +1,31 @@
+--- a/app/x86/interrupt.c
++++ b/app/x86/interrupt.c
+@@ -15,6 +15,7 @@
+ #include "keyboard.h"
+ #include "screen.h"
+ #include "smp.h"
++#include "unistd.h"
+
+ #include "error.h"
+ #include "display.h"
+@@ -246,8 +247,17 @@ void interrupt(struct trap_regs *trap_regs)
+     }
+
+     clear_screen_region(ROW_FOOTER, 0, ROW_FOOTER, SCREEN_WIDTH - 1);
+-    prints(ROW_FOOTER, 0, "Press any key to reboot...");
+-
+-    while (get_key() == 0) { }
++    // BRR: auto-reboot after 60 s — T2 Macs have no working keyboard
++    // post-ExitBootServices so waiting for a key hangs forever.  Poll
++    // every ~100 ms so non-T2 hardware can still advance immediately.
++    prints(ROW_FOOTER, 0, "Press any key to reboot (or auto-reboot in 60 s)...");
++    for (unsigned s = 60; s > 0; s--) {
++        for (int i = 0; i < 10; i++) {
++            if (get_key() != 0) goto do_reboot;
++            usleep(100000);   /* 100 ms */
++        }
++        printf(ROW_FOOTER, 52, "%3u s ", s);
++    }
++do_reboot:
+     reboot();
+ }
