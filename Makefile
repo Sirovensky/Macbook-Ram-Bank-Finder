@@ -29,7 +29,8 @@ clean:
 
 distclean: clean
 	-rm -rf $(MT)/system/board $(MT)/system/a1990
-	-cd $(MT) && git checkout -- app/error.c app/main.c build/x86_64/Makefile 2>/dev/null || true
+	-cd $(MT) && git checkout -- app/error.c app/main.c system/screen.c system/smbios.c build/x86_64/Makefile 2>/dev/null || true
+	-cd $(MT) && rm -f grub/a1990-*.cfg
 
 help:
 	@echo "targets:"

@@ -58,4 +58,9 @@ const board_package_t *board_lookup(const board_profile_t *p,
 // memtest86plus's DMI parser).
 const char *smbios_board_id(void);
 
+// Diagnostics (source: 0=none, 2=v2, 3=v3, negative=failure code).
+int       smbios_debug_source(void);
+uintptr_t smbios_debug_ep_addr(void);
+uint32_t  smbios_debug_table_len(void);
+
 #endif // BOARD_TOPOLOGY_H

@@ -22,10 +22,13 @@ if ! command -v xorrisofs >/dev/null; then
     exit 1
 fi
 
-echo "==> make -C $bld iso"
-make -C "$bld" iso
+echo "==> make -C $bld grub-memtest.iso GRUB_CFG=a1990"
+# grub-memtest.iso uses GRUB as intermediate bootloader so we can force
+# gfxmode (Retina defaults to native 2880x1800 which makes text unreadable).
+# GRUB_CFG=a1990 pulls in grub/a1990-{efi,legacy}.cfg staged by apply.sh.
+make -C "$bld" grub-memtest.iso GRUB_CFG=a1990
 
-iso_src="$bld/memtest.iso"
+iso_src="$bld/grub-memtest.iso"
 iso_dst="$out/a1990-memtest.iso"
 cp "$iso_src" "$iso_dst"
 

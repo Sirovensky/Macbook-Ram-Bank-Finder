@@ -35,18 +35,28 @@
 #define MCHBAR_CHANNEL_HASH   0x5024   // tentative, Haswell location
 #define MCHBAR_CHANNEL_EHASH  0x5028   // tentative, Haswell location
 
-// MAD_DIMM bit layout — Haswell layout used as starting point.
-// Validated fields will migrate to proper Skylake+ positions after
-// first calibration run on an A1990.
-#define MAD_DIMM_A_SIZE_SHIFT    0
-#define MAD_DIMM_A_SIZE_MASK     0xFF
-#define MAD_DIMM_B_SIZE_SHIFT    8
-#define MAD_DIMM_B_SIZE_MASK     0xFF
-#define MAD_DIMM_A_RANKS_BIT     (1 << 17)
-#define MAD_DIMM_B_RANKS_BIT     (1 << 18)
-#define MAD_DIMM_A_WIDTH_BIT     (1 << 19)   // 0=x8, 1=x16
-#define MAD_DIMM_B_WIDTH_BIT     (1 << 20)
-#define MAD_DIMM_SIZE_UNIT_MB    256
+// MAD_DIMM bit layout — Skylake/Coffee Lake client IMC.
+//
+// Not published in coreboot (SKL+ uses FSP blob for raminit, no open
+// source). Derived from two sources:
+//   1. memtest86plus intel_skl.c: MAD_IN_USE_MASK = 0x003F003F places
+//      size fields at [5:0] + [21:16] (6-bit, in GB, up to 64GB/DIMM).
+//   2. Haswell layout at coreboot sandybridge/registers/mchbar.h:233-250
+//      (8-bit ×256MB size, rank/width in [17:20]) as structural model.
+//   3. A1990 calibration (raw=0x410, known 1R x16 16GB/ch) validates
+//      width bit at [10] and rank field at [9:8].
+// Names A/B correspond to DIMM_L (large) and DIMM_S (small) per Intel.
+#define MAD_DIMM_A_SIZE_SHIFT    0       // DIMM_L size
+#define MAD_DIMM_A_SIZE_MASK     0x3F    // GB
+#define MAD_DIMM_B_SIZE_SHIFT    16      // DIMM_S size
+#define MAD_DIMM_B_SIZE_MASK     0x3F    // GB
+#define MAD_DIMM_A_RANKS_SHIFT   8       // DLR: 0=1R, 1=2R, 2=4R, 3=8R
+#define MAD_DIMM_A_RANKS_MASK    0x3
+#define MAD_DIMM_B_RANKS_SHIFT   12      // DSR
+#define MAD_DIMM_B_RANKS_MASK    0x3
+#define MAD_DIMM_A_WIDTH_BIT     (1 << 10)   // DLW: 0=x8, 1=x16
+#define MAD_DIMM_B_WIDTH_BIT     (1 << 11)   // DSW
+#define MAD_DIMM_SIZE_UNIT_MB    1024
 
 static struct mc_config g_config;
 static bool             g_config_cached;
@@ -85,15 +95,17 @@ static void decode_mad_dimm(uint32_t raw, struct mc_channel *ch)
     ch->mad_dimm_raw = raw;
     uint32_t size_a = (raw >> MAD_DIMM_A_SIZE_SHIFT) & MAD_DIMM_A_SIZE_MASK;
     uint32_t size_b = (raw >> MAD_DIMM_B_SIZE_SHIFT) & MAD_DIMM_B_SIZE_MASK;
+    uint32_t rnk_a  = (raw >> MAD_DIMM_A_RANKS_SHIFT) & MAD_DIMM_A_RANKS_MASK;
+    uint32_t rnk_b  = (raw >> MAD_DIMM_B_RANKS_SHIFT) & MAD_DIMM_B_RANKS_MASK;
 
     ch->dimm[0].populated = size_a > 0;
     ch->dimm[0].size_mb   = size_a * MAD_DIMM_SIZE_UNIT_MB;
-    ch->dimm[0].ranks     = (raw & MAD_DIMM_A_RANKS_BIT) ? 2 : 1;
+    ch->dimm[0].ranks     = (uint8_t)(1u << rnk_a);
     ch->dimm[0].width     = (raw & MAD_DIMM_A_WIDTH_BIT) ? 16 : 8;
 
     ch->dimm[1].populated = size_b > 0;
     ch->dimm[1].size_mb   = size_b * MAD_DIMM_SIZE_UNIT_MB;
-    ch->dimm[1].ranks     = (raw & MAD_DIMM_B_RANKS_BIT) ? 2 : 1;
+    ch->dimm[1].ranks     = (uint8_t)(1u << rnk_b);
     ch->dimm[1].width     = (raw & MAD_DIMM_B_WIDTH_BIT) ? 16 : 8;
 
     ch->populated = ch->dimm[0].populated || ch->dimm[1].populated;
@@ -217,5 +229,22 @@ void cfl_dump_mchbar(void)
             mch_read32(mch, off + 8),
             mch_read32(mch, off + 12));
         scroll();
+    }
+}
+
+void cfl_dump_mchbar_at(int row_first, int row_last)
+{
+    const struct mc_config *mc = cfl_mc_config();
+    if (!mc) return;
+    uintptr_t mch = map_region(mc->mchbar_base, MCHBAR_WINDOW, false);
+    if (!mch) return;
+
+    int r = row_first;
+    for (uint32_t off = 0x5000; off < 0x5100 && r <= row_last; off += 16) {
+        printf(r++, 0, "%04x: %08x %08x %08x %08x", off,
+            mch_read32(mch, off + 0),
+            mch_read32(mch, off + 4),
+            mch_read32(mch, off + 8),
+            mch_read32(mch, off + 12));
     }
 }

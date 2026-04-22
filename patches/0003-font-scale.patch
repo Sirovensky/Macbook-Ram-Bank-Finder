@@ -1,0 +1,95 @@
+diff --git a/system/screen.c b/system/screen.c
+index 5401914..9e7b426 100644
+--- a/system/screen.c
++++ b/system/screen.c
+@@ -67,6 +67,14 @@ static uint32_t lfb_pallete[16];
+ 
+ static lfb_rotate_t lfb_rotate = LFB_TOP_UP;
+ 
++// Integer pixel-scale for the font blit. Memtest's 80x25 x 8x16 grid is
++// only 640x400 pixels. On Retina panels (e.g. MacBook Pro A1990 @ 2880x1800)
++// that is a tiny ~22% centered patch. Picking scale=3 gives 1920x1200, which
++// nearly fills the physical panel and makes text readable.
++// Value is picked in screen_init() from the GOP resolution; override with
++// `screen.scale=N` on the kernel cmdline.
++static int lfb_scale = 1;
++
+ static uint8_t current_attr = WHITE | BLUE << 4;
+ 
+ //------------------------------------------------------------------------------
+@@ -88,6 +96,16 @@ static void parse_option(const char *option, int option_length)
+         lfb_rotate = LFB_LHS_UP;
+         return;
+     }
++    if ((option_length >= 7) && (strncmp(option, "scale=", 6) == 0)) {
++        int v = 0;
++        for (int i = 6; i < option_length; i++) {
++            char c = option[i];
++            if (c < '0' || c > '9') return;
++            v = v * 10 + (c - '0');
++        }
++        if (v >= 1 && v <= 4) lfb_scale = v;
++        return;
++    }
+ }
+ 
+ static void parse_cmd_line(uintptr_t cmd_line_addr, uint32_t cmd_line_size)
+@@ -268,7 +286,7 @@ static void lfb32_put_char(int row, int col, uint8_t ch, uint8_t attr)
+                 font_row <<= 1;
+             }
+         }
+-    } else {
++    } else if (lfb_scale <= 1) {
+         uint32_t *pixel_row = (uint32_t *)lfb_base + row * FONT_HEIGHT * lfb_stride + col * FONT_WIDTH;
+         for (int y = 0; y < FONT_HEIGHT; y++) {
+             uint8_t font_row = font_data[ch][y];
+@@ -278,6 +296,24 @@ static void lfb32_put_char(int row, int col, uint8_t ch, uint8_t attr)
+             }
+             pixel_row += lfb_stride;
+         }
++    } else {
++        int s = lfb_scale;
++        uint32_t *pixel_row = (uint32_t *)lfb_base
++            + (row * FONT_HEIGHT * s) * lfb_stride
++            + (col * FONT_WIDTH  * s);
++        for (int y = 0; y < FONT_HEIGHT; y++) {
++            uint8_t font_row = font_data[ch][y];
++            for (int sy = 0; sy < s; sy++) {
++                uint32_t *p = pixel_row + sy * lfb_stride;
++                uint8_t bits = font_row;
++                for (int x = 0; x < FONT_WIDTH; x++) {
++                    uint32_t c = bits & 0x80 ? fg_colour : bg_colour;
++                    for (int sx = 0; sx < s; sx++) *p++ = c;
++                    bits <<= 1;
++                }
++            }
++            pixel_row += s * lfb_stride;
++        }
+     }
+ }
+ 
+@@ -363,11 +399,22 @@ void screen_init(void)
+                 lfb_base += (excess_height / 2) * lfb_stride;
+             }
+         } else {
+-            int excess_width = lfb_width - (SCREEN_WIDTH * FONT_WIDTH);
++            // Auto-select pixel scale if user didn't override. Pick the
++            // largest integer scale that still fits the framebuffer. Only
++            // applied on the non-rotated 32bpp path (see lfb32_put_char).
++            if (lfb_scale == 1 && lfb_bytes_per_pixel == 4) {
++                int sx = lfb_width  / (SCREEN_WIDTH  * FONT_WIDTH);
++                int sy = lfb_height / (SCREEN_HEIGHT * FONT_HEIGHT);
++                int s  = sx < sy ? sx : sy;
++                if (s > 4) s = 4;
++                if (s < 1) s = 1;
++                lfb_scale = s;
++            }
++            int excess_width = lfb_width - (SCREEN_WIDTH * FONT_WIDTH * lfb_scale);
+             if (excess_width > 0) {
+                 lfb_base += (excess_width / 2) * lfb_bytes_per_pixel;
+             }
+-            int excess_height = lfb_height - (SCREEN_HEIGHT * FONT_HEIGHT);
++            int excess_height = lfb_height - (SCREEN_HEIGHT * FONT_HEIGHT * lfb_scale);
+             if (excess_height > 0) {
+                 lfb_base += (excess_height / 2) * lfb_stride;
+             }

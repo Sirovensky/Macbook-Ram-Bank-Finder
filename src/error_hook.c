@@ -18,6 +18,9 @@
 extern int scroll_message_row;
 extern void scroll(void);
 
+// memtest86plus's printf supports only %c %s %i %u %x %k. No %l/%ll length
+// modifiers. uintptr_t is 64-bit on x86_64 so plain %x handles 64-bit vals.
+
 void board_report_error(uint64_t addr, uint64_t xor_bits)
 {
     struct pa_decoded pa = cfl_decode_pa(addr);
@@ -27,15 +30,14 @@ void board_report_error(uint64_t addr, uint64_t xor_bits)
     for (int bit = 0; bit < 64; bit++) {
         if (xor_bits & (1ULL << bit)) lane_mask |= 1 << (bit / 8);
     }
-    if (!lane_mask && xor_bits != 0) lane_mask = 0x01;
     if (!lane_mask) return;
 
     const board_profile_t *p = board_detect();
     uint8_t ranks = p ? p->ranks_per_channel : 1;
     const char *qual = (ranks > 1) ? "?" : "";
 
-    display_scrolled_message(0, "[mem] ch%u addr=%016llx xor=%016llx",
-        pa.channel, (unsigned long long)addr, (unsigned long long)xor_bits);
+    display_scrolled_message(0, "[mem] ch%u addr=%016x xor=%016x",
+        pa.channel, (uintptr_t)addr, (uintptr_t)xor_bits);
     scroll();
 
     // T1 line: byte lanes always

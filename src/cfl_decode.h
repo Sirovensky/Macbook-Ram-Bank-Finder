@@ -61,4 +61,7 @@ struct pa_decoded cfl_decode_pa(uint64_t pa);
 // Dump all IMC-relevant MCHBAR registers to the screen (calibration mode).
 void cfl_dump_mchbar(void);
 
+// Same, but prints to fixed rows [row_first..row_last] with no scrolling.
+void cfl_dump_mchbar_at(int row_first, int row_last);
+
 #endif // CFL_DECODE_H

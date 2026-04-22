@@ -79,6 +79,12 @@ if ! grep -q "^system/board/%.o:" "$mk"; then
     ' "$mk" > "$mk.new" && mv "$mk.new" "$mk"
 fi
 
+# 3c. Stage custom GRUB cfg (forces larger gfxmode so text is readable on Retina).
+if [[ -d "$here/grub" ]]; then
+    echo "==> staging grub/ -> $mt/grub/"
+    cp "$here"/grub/a1990-*.cfg "$mt/grub/"
+fi
+
 # 4. Apply source patches.
 apply_patch() {
     local pf="$1" marker="$2" file="$3"
@@ -92,5 +98,7 @@ apply_patch() {
 
 apply_patch 0001-hook-error-reporter.patch     "board_report_error"    "app/error.c"
 apply_patch 0002-startup-calibration.patch     "board_calibrate"       "app/main.c"
+apply_patch 0003-font-scale.patch              "lfb_scale"             "system/screen.c"
+apply_patch 0004-smbios3.patch                 "parse_smbios3_anchor"  "system/smbios.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"
