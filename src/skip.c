@@ -104,8 +104,18 @@ void board_prune_vm_map(void)
             vm_map[i] = scratch[i];
         }
         vm_map_size = (int)(out > MAX_MEM_SEGMENTS ? MAX_MEM_SEGMENTS : out);
-        display_scrolled_message(0, "[skip] pruned vm_map to %d entries (%u MiB skipped)",
-                                 vm_map_size, nskip);
-        scroll();
+
+        // Only announce when the skip-list size has grown since the last
+        // prune — a new window may re-trigger the split logic against the
+        // same list and we don't want to spam the scroll area.  memtest's
+        // printf only knows %i %u %x (no %d), so use %i for signed ints.
+        static unsigned last_announced_nskip = 0;
+        if (nskip != last_announced_nskip) {
+            last_announced_nskip = nskip;
+            display_scrolled_message(0,
+                "[skip] pruned vm_map to %i entries (%u MiB skipped total)",
+                vm_map_size, (uintptr_t)nskip);
+            scroll();
+        }
     }
 }
