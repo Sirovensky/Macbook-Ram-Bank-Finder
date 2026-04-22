@@ -522,55 +522,53 @@ uint32_t efi_menu(void *sys_table_arg, void *image_handle_arg, const char *cmdli
     // keyboard input — ConIn works at that point because we're still
     // pre-ExitBootServices).
     // ---------------------------------------------------------------------------
-    if (cmdline_has(cmdline, "brr_auto_page")) {
-        con_puts("\r\n  [auto] brr_auto_page in cmdline -> page-mask mode\r\n\r\n");
-        // Still run decoder self-test so page-mode is optionally upgraded
-        // to row-mode by the shim.  Skip if NVRAM state already set.
-        {
-            char probe[64] = {0};
-            if (read_state(probe, sizeof(probe) - 1) == 0)
-                decoder_selftest_run(st);
-        }
-        return BRR_FLAG_SKIP_COUNTDOWNS | BRR_FLAG_AUTO_REBOOT_AFTER_PASS
-             | BRR_FLAG_TRIAL_PAGE;
-    }
-    if (cmdline_has(cmdline, "brr_auto_chip")) {
-        con_puts("\r\n  [auto] brr_auto_chip in cmdline -> chip-mask mode\r\n\r\n");
-        {
-            char probe[64] = {0};
-            if (read_state(probe, sizeof(probe) - 1) == 0)
-                decoder_selftest_run(st);
-        }
-        return BRR_FLAG_SKIP_COUNTDOWNS | BRR_FLAG_AUTO_REBOOT_AFTER_PASS
-             | BRR_FLAG_AUTO_TRIAL_CHIP | BRR_FLAG_TRIAL_CHIP;
-    }
-
     // ---------------------------------------------------------------------------
-    // Track B: Decoder self-test.
-    // Run only when there is no existing BrrMaskState NVRAM entry — i.e. on
-    // the first user-facing menu (state == NONE).  For TRIAL_PENDING_* and
-    // TRIAL_BOOTED states we skip: the result from the NONE run is already
-    // persisted in the BrrDecoderStatus NVRAM variable and re-running during
-    // an automated chainload cycle wastes time and could confuse the state
-    // machine.
+    // Phase A (ORDER MATTERS): check NVRAM state machine FIRST, BEFORE
+    // honouring cmdline auto-flags.  If a previous memtest pass wrote
+    // TRIAL_PENDING_* to BrrMaskState, we need to chainload mask-shim.efi
+    // this boot — not re-run memtest.  grub entry 1 unconditionally
+    // passes `brr_auto_page`; if we returned early on that flag the
+    // state machine would loop detect->detect->detect and the shim
+    // would never run.
     // ---------------------------------------------------------------------------
     {
         char state_probe[64] = {0};
         unsigned probe_sz = read_state(state_probe, sizeof(state_probe) - 1);
         if (probe_sz == 0) {
-            // No existing state — this is a fresh NONE boot; run the self-test.
+            // No existing state — this is a fresh NONE boot; run the
+            // decoder self-test once so page-mode can later upgrade to
+            // row-mode in the shim.
             decoder_selftest_run(st);
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Phase B: check if NVRAM has a pending trial state — if so, chainload
-    // mask-shim.efi (TRIAL_PENDING_*) or run the permanent-install prompt
-    // (TRIAL_BOOTED, may chainload install.efi and never return).
-    // ---------------------------------------------------------------------------
     uint32_t auto_flags = check_nvram_state(image_handle);
     if (auto_flags != 0xFFFFFFFFu) {
+        // State said: chainload shim (TRIAL_PENDING_*) or prompt for
+        // permanent (TRIAL_BOOTED).  Either way, the function already
+        // did the chainload — the returned flags tell the caller what
+        // to do if the chainload failed.  Return now; cmdline flags
+        // are irrelevant once the state machine owns the boot.
         return auto_flags;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase B: no pending state.  Honour cmdline auto-flags to drive a
+    // fresh detect run unattended.  grub entry 1 sets brr_auto_page,
+    // entry 2 sets brr_auto_chip, entry 7 adds brr_fast.  Tests run,
+    // errors get logged, BrrBadPages + BrrMaskState=TRIAL_PENDING_PAGE
+    // written at pass end, auto-reboot — and THIS function runs again
+    // on the next boot, goes through Phase A, and chainloads the shim.
+    // ---------------------------------------------------------------------------
+    if (cmdline_has(cmdline, "brr_auto_page")) {
+        con_puts("\r\n  [auto] brr_auto_page in cmdline -> page-mask mode\r\n\r\n");
+        return BRR_FLAG_SKIP_COUNTDOWNS | BRR_FLAG_AUTO_REBOOT_AFTER_PASS
+             | BRR_FLAG_TRIAL_PAGE;
+    }
+    if (cmdline_has(cmdline, "brr_auto_chip")) {
+        con_puts("\r\n  [auto] brr_auto_chip in cmdline -> chip-mask mode\r\n\r\n");
+        return BRR_FLAG_SKIP_COUNTDOWNS | BRR_FLAG_AUTO_REBOOT_AFTER_PASS
+             | BRR_FLAG_AUTO_TRIAL_CHIP | BRR_FLAG_TRIAL_CHIP;
     }
 
     // Clear screen (ANSI ESC[2J + ESC[H as UCS-2).
