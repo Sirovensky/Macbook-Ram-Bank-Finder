@@ -1,44 +1,48 @@
 --- a/app/display.c
 +++ b/app/display.c
-@@ -600,14 +600,33 @@ void do_tick(int my_cpu)
+@@ -582,24 +582,34 @@ void do_tick(int my_cpu)
+ 
+     pass_type_t pass_type = (pass_num == 0) ? FAST_PASS : FULL_PASS;
+ 
++    // BRR: scale test% by estimated vm_map growth.
++    // Dummy_run calibrated ticks_per_test against an UNPRUNED vm_map
++    // (one contiguous entry per memory segment).  After board_prune_vm_map
++    // splits entries around skip ranges, the outer loop runs MORE iterations
++    // — test_ticks overshoots ticks_per_test and the bar locks at 100%
++    // mid-test.  Multiply expected ticks by (1 + nskip); each skip
++    // splits at most one segment into two.
+     int pct = 0;
+-    if (ticks_per_test[pass_type][test_num] > 0) {
+-        pct = 100 * test_ticks / ticks_per_test[pass_type][test_num];
+-        if (pct > 100) {
+-            pct = 100;
++    {
++        extern unsigned board_skip_count_public(void);
++        unsigned nskip = board_skip_count_public();
++        int denom = ticks_per_test[pass_type][test_num] * (int)(1u + nskip);
++        if (denom > 0) {
++            pct = 100 * test_ticks / denom;
++            if (pct > 100) pct = 100;
+         }
+     }
      display_test_percentage(pct);
      display_test_bar((BAR_LENGTH * pct) / 100);
-
+ 
 -    pct = 0;
 -    if (ticks_per_pass[pass_type] > 0) {
 -        pct = 100 * pass_ticks / ticks_per_pass[pass_type];
 -        if (pct > 100) {
 -            pct = 100;
 -        }
--    }
--    display_pass_percentage(pct);
-+    // BRR: pass progress based on completed test count, not tick ratio.
-+    //
-+    // The tick-ratio formula (pass_ticks / ticks_per_pass[pass_type])
-+    // was calibrated during the dummy run against an untouched vm_map
-+    // covering the full installed memory.  Once the burst detector
-+    // (patch 0013) fires and board_prune_vm_map (patch 0015) splits
-+    // vm_map entries around skip ranges, each test's outer loop does
-+    // MORE iterations on the same installed memory — pass_ticks
-+    // overshoots ticks_per_pass and the bar locks at 100% while only
-+    // a few tests are complete.
-+    //
-+    // Replace with a simple "how many tests done + fraction of the
-+    // current test" metric.  Bounded by design, independent of how
-+    // many vm_map splits occurred.  NUM_TEST_PATTERNS is fixed at
-+    // 11, so each test contributes ~9 percentage points.
++    // BRR: pass% = completed tests + fraction of current test.
++    // Immune to vm_map splits; bounded by design.
 +    {
-+        int done = test_num;                       // 0..NUM_TEST_PATTERNS-1
-+        int in_test_pct = 0;
-+        if (ticks_per_test[pass_type][test_num] > 0) {
-+            in_test_pct = 100 * test_ticks / ticks_per_test[pass_type][test_num];
-+            if (in_test_pct > 100) in_test_pct = 100;
-+        }
-+        int pass_pct = (done * 100 + in_test_pct) / NUM_TEST_PATTERNS;
++        int pass_pct = (test_num * 100 + pct) / NUM_TEST_PATTERNS;
 +        if (pass_pct > 100) pass_pct = 100;
 +        display_pass_percentage(pass_pct);
-+        pct = pass_pct;  // reused below for the bar
-+    }
++        pct = pass_pct;
+     }
+-    display_pass_percentage(pct);
      display_pass_bar((BAR_LENGTH * pct) / 100);
-
+ 
      bool update_spinner = true;

@@ -99,6 +99,9 @@ void board_prune_vm_map(void)
         }
     }
 
+    // Capture pre/post sizes for the progress-bar compensation hook.
+    int pre_size = vm_map_size;
+
     if (any_pruned) {
         for (unsigned i = 0; i < out && (int)i < MAX_MEM_SEGMENTS; i++) {
             vm_map[i] = scratch[i];
@@ -118,4 +121,37 @@ void board_prune_vm_map(void)
             scroll();
         }
     }
+    (void)pre_size;
+}
+
+// Accessor for the progress-bar compensation hook in app/display.c.
+//
+// The test% bar was calibrated against an UNPRUNED vm_map during the
+// dummy run.  After pruning splits vm_map entries, each test's outer
+// loop `for (i=0; i<vm_map_size; i++)` iterates more times than the
+// dummy predicted — test_ticks overshoots ticks_per_test, bar locks
+// at 100% mid-test.
+//
+// We expose the current vm_map_size via this function and the
+// patched do_tick() in app/display.c applies the ratio
+// (ticks_per_test * current_size / baseline_size) in the %
+// calculation so the bar tracks real progress.
+//
+// Returns current vm_map_size.  Baseline (pre-prune) size is not
+// tracked — callers use live vm_map_size; the test% patch below
+// compensates in proportion to how many skip ranges are active.
+int board_current_vm_map_size(void)
+{
+    return vm_map_size;
+}
+
+// Total number of skip entries currently active.  Used by display.c's
+// do_tick() to estimate how much the vm_map grew relative to dummy.
+// Each skip entry splits at most one vm_map entry in two, so the
+// approximate growth factor is (1 + nskip / baseline).  For our
+// typical case (baseline ~1-2 entries), growth ~= 1 + nskip.
+unsigned board_skip_count_public(void)
+{
+    extern unsigned badmem_log_skip_count(void);
+    return badmem_log_skip_count();
 }
