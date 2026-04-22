@@ -74,8 +74,49 @@ typedef efi_status_t (efiapi *set_variable_fn)(
     uintn_t       data_size,
     void         *data);
 
+typedef efi_status_t (efiapi *get_variable_fn)(
+    efi_char16_t *name,
+    efi_guid_t   *guid,
+    uint32_t     *attrs,
+    uintn_t      *data_size,
+    void         *data);
+
 // EFI variable attribute bits.
 #define EFI_VAR_NV_BS_RT  (0x00000001u | 0x00000002u | 0x00000004u)
+
+// Readback verification: immediately GetVariable after SetVariable and
+// compare size.  If GetVariable returns non-success or size=0, the write
+// was silently rejected (T2 Full Security namespace filter, per-GUID
+// policy, etc.) and the shim will never see the state on next boot.
+// Prints a loud warning so the user knows why the flow is stuck.
+static int verify_readback(efi_runtime_services_t *rt,
+                            const efi_char16_t *name,
+                            const char *label,
+                            uintn_t expected_min_size)
+{
+    if (!rt) return 0;
+    get_variable_fn get_var = (get_variable_fn)(uintptr_t)rt->get_variable;
+    if (!get_var) return 0;
+
+    static uint8_t probe[4096];
+    uintn_t sz = sizeof(probe);
+    uint32_t attrs = 0;
+    efi_status_t gs = get_var((efi_char16_t *)name,
+                              (efi_guid_t *)&BRR_GUID,
+                              &attrs, &sz, probe);
+    if (gs == EFI_SUCCESS && sz >= expected_min_size) {
+        display_scrolled_message(0, "[nvram]   readback %s OK (%u bytes, attrs=%x)",
+                                 (uintptr_t)label, (uintptr_t)sz, (uintptr_t)attrs);
+        scroll();
+        return 1;
+    }
+    display_scrolled_message(0, "[nvram]   READBACK FAILED %s (get_var status=%x sz=%u)",
+                             (uintptr_t)label, (uintptr_t)gs, (uintptr_t)sz);
+    scroll();
+    display_scrolled_message(0, "[nvram]   -> T2 silently rejected write. Lower Secure Boot to No Security.");
+    scroll();
+    return 0;
+}
 
 // ---------------------------------------------------------------------------
 // Binary blob layout written to NVRAM.
@@ -321,6 +362,8 @@ void badmem_log_flush_nvram(void)
     if (status == EFI_SUCCESS) {
         display_scrolled_message(0, "[nvram] saved %u bad page(s) to NVRAM", n);
         scroll();
+        verify_readback(rt, BRR_VARNAME_BADPAGES, "BrrBadPages",
+                        sizeof(badpages_hdr_t));
     } else {
         // SetVariable failed — NVRAM might be read-only (T2 Medium Security,
         // firmware locked, or BrrBadPages blob exceeded per-variable cap).
@@ -395,6 +438,7 @@ void badmem_log_flush_nvram(void)
     if (ss == EFI_SUCCESS) {
         display_scrolled_message(0, "[nvram] state -> %s", new_state);
         scroll();
+        verify_readback(rt, BRR_VARNAME_STATE, "BrrMaskState", state_len);
     } else {
         display_scrolled_message(0, "[nvram] WARNING: could not set BrrMaskState (status %x)",
                                  (uintptr_t)ss);
