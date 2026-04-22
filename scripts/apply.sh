@@ -176,5 +176,13 @@ apply_patch 0011-scroll-never-block.patch      "BRR: non-blocking scroll" "app/d
 # T2 HID proxy, freezing the test.  Drop the call — do_tick's own BSP-
 # only check_input (outside the mutex) still handles ESC.
 apply_patch 0012-no-check-input-in-common-err.patch "BRR: do NOT call check_input" "app/error.c"
+# Early-bail on error burst.  Detects contiguous-address error run
+# (indicates a single bad region saturating the CPU) AND absolute error
+# count cap.  Flipping `bail` exits current test, main loop advances
+# to next.  The bad region is still recorded in BrrBadPages; the shim
+# expands each logged PA +/- 1 MiB on the next boot so the masked
+# range covers the full failing chip region without ever re-running
+# the problematic test pattern against it.
+apply_patch 0013-early-bail-on-many-errors.patch "BRR: early-bail trigger" "app/error.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"

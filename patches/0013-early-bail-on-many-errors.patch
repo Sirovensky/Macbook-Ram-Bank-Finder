@@ -1,0 +1,32 @@
+--- a/app/error.c
++++ b/app/error.c
+@@ -165,6 +165,29 @@ static void common_err(error_type_t type, uintptr_t addr, testword_t good, testw
+ 
+     testword_t xor = good ^ bad;
+ 
++    // BRR: early-bail trigger.
++    //
++    // When a single DRAM chip is failing hard, an aggressive test like
++    // block_move walks gigabytes of memory and produces tens of thousands
++    // of data_error() -> common_err() calls per pass.  Each iteration
++    // takes tens of microseconds under error_mutex; non-failing CPUs
++    // finish their chunks quickly and park at the LONG_BARRIER waiting
++    // for the failing CPU to drain its error storm.  The master CPU is
++    // stuck in that barrier wait and do_tick() never runs — from the
++    // outside the system looks hard-frozen (timer stopped, no progress).
++    //
++    // 128 errors is far more than enough to identify the bad chip (the
++    // decoder reads the same designator regardless of how many more
++    // errors arrive).  Flip `bail` so every test's BAILOUT macro returns
++    // early; the main loop advances to the next test or pass-end.
++    extern bool bail;
++    if (error_count >= 128 && !bail) {
++        bail = true;
++    }
++
++    extern void board_report_error(uint64_t addr, uint64_t xor_bits);
++    if (type == DATA_ERROR || type == ADDR_ERROR) board_report_error((uint64_t)addr, (uint64_t)xor);
++
+     bool new_stats = false;
+     testword_t page   = page_of((void *)addr);
+     testword_t offset = addr & (PAGE_SIZE - 1);
