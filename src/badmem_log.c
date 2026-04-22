@@ -277,12 +277,16 @@ void badmem_log_flush_nvram(void)
     if (chip_mode && chip_buf_used > 0) {
         // Write BrrBadChips: comma-separated designator list (e.g.
         // "U2620,U2310").  Include the trailing NUL so the reader can
-        // safely treat the value as a C string.
+        // Write comma-separated list WITHOUT trailing NUL — matches the
+        // no-NUL convention used by mask_nvram_set_ascii / state strings,
+        // and avoids the off-by-one where a full 256-byte payload would
+        // overflow the reader's (bufsz-1)-byte capacity in
+        // mask_nvram_get_ascii.  Reader NUL-terminates at buf[sz].
         efi_status_t sc = set_var(
             (efi_char16_t *)BRR_VARNAME_BADCHIPS,
             (efi_guid_t *)&BRR_GUID,
             EFI_VAR_NV_BS_RT,
-            (uintn_t)(chip_buf_used + 1), chip_buf);
+            (uintn_t)chip_buf_used, chip_buf);
 
         if (sc == EFI_SUCCESS) {
             display_scrolled_message(0, "[nvram] saved BrrBadChips (%u byte(s))",

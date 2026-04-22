@@ -204,8 +204,13 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
                 efi_stall_ms(st, 5000);
                 return sp;
             }
+            // Delete probe — T2 rejects attrs=0, must pass NV|BS|RT to
+            // match the variable's stored attributes.  See mask_ops.c:88.
             st->RuntimeServices->SetVariable(
-                (CHAR16 *)test_var, (EFI_GUID *)&BRR_GUID, 0, 0, NULL);
+                (CHAR16 *)test_var, (EFI_GUID *)&BRR_GUID,
+                EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                    EFI_VARIABLE_RUNTIME_ACCESS,
+                0, NULL);
         }
 
         // First confirmation.

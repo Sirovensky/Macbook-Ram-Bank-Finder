@@ -804,7 +804,7 @@ static CHAR16 prompt_confirm(EFI_SYSTEM_TABLE *st, unsigned timeout_s)
 
 // ---------------------------------------------------------------------------
 // Read BrrBadChips NVRAM variable (with legacy A1990BadChips fallback) and
-// populate chip entries from it.  Chips are NUL-separated ASCII designators.
+// populate chip entries from it.  Chips are comma-separated ASCII designators.
 // Returns number of chips parsed.
 // ---------------------------------------------------------------------------
 static unsigned read_nvram_badchips(EFI_SYSTEM_TABLE *st,

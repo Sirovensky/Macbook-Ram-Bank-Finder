@@ -41,10 +41,18 @@ Living list. PRs welcome. Tick when landed; move to CHANGELOG if kept.
 
 ## P1 — address decode coverage
 
-- [ ] **Bank / row / column PA decode** — `cfl_decode_pa()` returns only
-  channel + rank. To narrow faults further (to specific internal DRAM
-  bank) requires understanding `MAD_INTRA_CHx` fully. See
-  `src/cfl_decode.c` `TODO` comments.
+- [x] **Bank / row / column PA decode** — implemented in Phase A via
+  `src/imc/cfl_skl_kbl.c::cfl_skl_decode_bank_row_col()` using DRAMDig
+  Skylake XOR prior (BG0=PA[7]^PA[14], BG1=PA[8]^PA[9]^PA[12]^PA[13]^
+  PA[18]^PA[19], BA0=PA[15]^PA[18], BA1=PA[16]^PA[19], row=PA[18:18+N]).
+  Validated at boot via `src/decoder_selftest.c` bank-conflict timing
+  probe. Row-level masking (~8 KiB per bad row) replaces chip-mode's
+  16 GiB-per-chip penalty when `BrrDecoderStatus = VALIDATED`.
+- [ ] **Empirical decoder learning (Phase B)** — if the self-test fails
+  on a new CPU / firmware combination, run a DRAMA-style timing probe
+  to learn XOR masks instead of hardcoding DRAMDig prior. Currently
+  falls back to full-channel chip-mask on failure (safe but costs
+  16 GiB).
 
 - [ ] **Asymmetric / ECM channel mode** — `decode_channel()` only handles
   symmetric (PA[6] interleave) and hash modes. ECM with per-channel PA

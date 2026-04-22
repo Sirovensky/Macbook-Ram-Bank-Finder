@@ -199,7 +199,7 @@ NVRAM vars under vendor GUID `3E3E9DB2-1A2B-4B5C-9D1E-5F6A7B8C9D0E`:
 |---|---|
 | `BrrMaskState` | `NONE`, `TRIAL_PENDING_{PAGE,CHIP}`, `TRIAL_BOOTED`, `PERMANENT_UNCONFIRMED`, `PERMANENT_CONFIRMED` |
 | `BrrBadPages` | Binary: `[uint32 version=1][uint32 count][uint64 PAs...]` |
-| `BrrBadChips` | NUL-separated ASCII chip designators |
+| `BrrBadChips` | comma-separated ASCII chip designators |
 | `BrrBackupBootOrder` | Saved BootOrder for revert |
 | `BrrBackupBootEntries` | Pre-install list of Boot* slots |
 | `BrrBootSlot` | Our BootNNNN slot number |
