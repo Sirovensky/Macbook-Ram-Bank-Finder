@@ -196,5 +196,9 @@ apply_patch 0016-pass-progress-test-count.patch "BRR: pass% = completed tests" "
 # Suppress FAIL banner on A1990 (T2 keyboard can't dismiss it; overlay
 # covers end-of-pass summary + NVRAM messages + auto-reboot countdown).
 apply_patch 0017-no-fail-banner.patch "BRR: suppress the FAIL banner" "app/display.c"
+# T2-hardened reboot: try UEFI ResetSystem WARM+COLD, cf9, KB-ctrl,
+# then triple-fault as guaranteed last resort.  Default reboot()
+# fell through on A1990 because T2 blocks every soft-reset path.
+apply_patch 0018-reboot-t2-hardened.patch "BRR: T2-hardened reboot" "system/x86/hwctrl.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"
