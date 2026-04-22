@@ -65,7 +65,11 @@ static int cmdline_contains(const char *needle)
 #include "tests.h"
 static void apply_test_filter(void)
 {
-    if (!cmdline_contains("brr_fast")) return;
+    if (!cmdline_contains("brr_fast")) {
+        display_scrolled_message(0, "[brr] fast mode NOT active (cmdline missing `brr_fast`)");
+        scroll();
+        return;
+    }
 
     // Enable only tests 0, 3, 5.  Everything else disabled.
     static const int keep[] = { 0, 3, 5 };
@@ -76,6 +80,12 @@ static void apply_test_filter(void)
         }
         test_list[i].enabled = k;
     }
+    display_scrolled_message(0,
+        "[brr] fast mode ACTIVE — enabled tests only: 0, 3, 5");
+    scroll();
+    display_scrolled_message(0,
+        "[brr] all other tests disabled (test_list[].enabled=false)");
+    scroll();
 }
 
 extern void sleep(unsigned int sec);
@@ -110,6 +120,25 @@ static void countdown(const char *tag, unsigned seconds)
 void board_calibrate(void)
 {
     int r;
+
+    // BRR debug: echo the kernel cmdline so the user can confirm grub
+    // actually passed what they expected.  First 70 chars only, so it
+    // fits one scroll row.
+    if (boot_params_addr != 0) {
+        const boot_params_t *bp = (const boot_params_t *)boot_params_addr;
+        if (bp->cmd_line_ptr != 0) {
+            const char *cmd = (const char *)(uintptr_t)bp->cmd_line_ptr;
+            char buf[72];
+            unsigned j = 0;
+            while (j < sizeof(buf) - 1 && cmd[j]) { buf[j] = cmd[j]; j++; }
+            buf[j] = 0;
+            display_scrolled_message(0, "[brr] cmdline: %s", (uintptr_t)buf);
+            scroll();
+        } else {
+            display_scrolled_message(0, "[brr] cmdline: (empty)");
+            scroll();
+        }
+    }
 
     // BRR debug: apply cmdline test-list filter BEFORE dummy_run starts.
     // Runs only 3 tests if `brr_fast` is in the kernel cmdline.
