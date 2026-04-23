@@ -349,6 +349,79 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     efi_print(st, L"        APPLY MASK -- enter bad addresses\r\n");
     efi_print(st, L"  ============================================\r\n");
     efi_print(st, L"\r\n");
+
+    // Check if NVRAM already has a saved mask from a previous run.  If
+    // so, offer a quick-retry path -- user just presses Y and we chain
+    // straight to mask-shim without re-typing addresses.  Covers the
+    // case where shim chainload failed (e.g. boot.efi not found) and
+    // the user wants to retry without reentering data.
+    {
+        static UINT8 existing[8 + 4096 * 8];
+        UINTN ex_sz = sizeof(existing);
+        UINT32 ex_attrs = 0;
+        EFI_STATUS sg = st->RuntimeServices->GetVariable(
+            (CHAR16 *)BRR_VARNAME_BADPAGES, (EFI_GUID *)&BRR_GUID,
+            &ex_attrs, &ex_sz, existing);
+        if (sg == EFI_SUCCESS && ex_sz >= 8) {
+            UINT32 n_existing = *(UINT32 *)(existing + 4);
+            if (n_existing > 0 && n_existing <= 4096 &&
+                ex_sz >= 8 + n_existing * 8) {
+                UINT64 *pa_arr = (UINT64 *)(existing + 8);
+                efi_print(st, L"  Existing saved mask in NVRAM:\r\n");
+                efi_print(st, L"\r\n");
+                for (UINT32 i = 0; i < n_existing && i < 8; i++) {
+                    efi_print(st, L"    ");
+                    efi_print_dec(st, (UINTN)(i + 1));
+                    efi_print(st, L". ");
+                    efi_print_hex(st, pa_arr[i]);
+                    efi_print(st, L"\r\n");
+                }
+                if (n_existing > 8) {
+                    efi_print(st, L"    ... and ");
+                    efi_print_dec(st, (UINTN)(n_existing - 8));
+                    efi_print(st, L" more\r\n");
+                }
+                efi_print(st, L"\r\n");
+                efi_print(st, L"  Y = apply this mask + boot macOS\r\n");
+                efi_print(st, L"  N = discard and enter new addresses\r\n");
+                efi_print(st, L"  ESC = cancel (reboot)\r\n");
+                efi_print(st, L"\r\n");
+
+                for (;;) {
+                    CHAR16 k = efi_readkey(st);
+                    if (k == L'Y' || k == L'y') {
+                        efi_newline(st);
+                        efi_print(st, L"  Applying mask + booting macOS ...\r\n");
+                        efi_stall_ms(st, 800);
+                        EFI_STATUS cs = chainload_shim(image_handle, st);
+                        efi_print(st, L"\r\n");
+                        efi_print(st, L"  Could not chainload mask-shim (status=");
+                        efi_print_hex(st, (UINT64)cs);
+                        efi_print(st, L").\r\n");
+                        efi_print(st, L"  NVRAM is still saved.  Reboot + retry entry 3,\r\n");
+                        efi_print(st, L"  or hold Option at boot and pick macOS manually.\r\n");
+                        efi_stall_ms(st, 15000);
+                        st->RuntimeServices->ResetSystem(
+                            EFI_RESET_WARM, EFI_SUCCESS, 0, NULL);
+                        for (;;) { __asm__ __volatile__("hlt"); }
+                    }
+                    if (k == 0x1B) {
+                        efi_print(st, L"\r\n  Cancelled -- rebooting.\r\n");
+                        efi_stall_ms(st, 1500);
+                        st->RuntimeServices->ResetSystem(
+                            EFI_RESET_WARM, EFI_SUCCESS, 0, NULL);
+                        for (;;) { __asm__ __volatile__("hlt"); }
+                    }
+                    if (k == L'N' || k == L'n') {
+                        efi_newline(st);
+                        break;  // fall through to address-entry prompt
+                    }
+                    efi_stall_ms(st, 50);
+                }
+            }
+        }
+    }
+
     efi_print(st, L"  Type the bad addresses from the memtest photo.\r\n");
     efi_print(st, L"\r\n");
     efi_print(st, L"  Format:  hex, comma-separated  (0x optional)\r\n");

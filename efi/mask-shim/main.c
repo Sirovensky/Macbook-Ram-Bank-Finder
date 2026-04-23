@@ -55,8 +55,15 @@ static const CHAR16 LEGACY_VARNAME_BADROWS[]= L"A1990BadRows";
 #define DECODER_STATUS_VALIDATED  "VALIDATED"
 #define DECODER_STATUS_FAILED     "FAILED"
 
-// Known APFS Preboot path to macOS boot.efi.
+// Known macOS boot.efi paths.  Modern macOS (APFS Preboot) puts boot.efi
+// at \<SystemVolumeUUID>\System\Library\CoreServices\boot.efi -- the UUID
+// directory is per-system-volume so we can't hard-code it.  Older macOS
+// (HFS+) puts it at the root-level path.  The finder below tries the
+// root-level path first, then scans one level of subdirectories on each
+// SFS handle so the UUID-prefix form is also covered.
 static const CHAR16 MACOS_BOOT_PATH[] =
+    L"\\System\\Library\\CoreServices\\boot.efi";
+static const CHAR16 MACOS_BOOT_SUFFIX[] =
     L"\\System\\Library\\CoreServices\\boot.efi";
 
 // ---------------------------------------------------------------------------
@@ -720,9 +727,10 @@ static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
 
     UINTN n_handles = buf_sz / sizeof(EFI_HANDLE);
     EFI_STATUS found = EFI_NOT_FOUND;
+    unsigned probed = 0;
 
     for (UINTN i = 0; i < n_handles; i++) {
-        // Skip our own device (USB or the ESP we were loaded from).
+        // Skip our own device (USB or ESP we were loaded from).
         if (handles[i] == own_dev) continue;
 
         // Skip removable media.
@@ -732,7 +740,6 @@ static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
         if (s == EFI_SUCCESS && bio->Media && bio->Media->RemovableMedia)
             continue;
 
-        // Try to open the volume and find boot.efi.
         EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = NULL;
         s = st->BootServices->HandleProtocol(
             handles[i], (EFI_GUID *)&sfs_guid, (void **)&sfs);
@@ -742,19 +749,76 @@ static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
         s = sfs->OpenVolume(sfs, &root);
         if (s != EFI_SUCCESS) continue;
 
+        probed++;
+
+        // Tier 1: root-level \System\Library\CoreServices\boot.efi
+        // (legacy HFS+ macOS, catalina and earlier).
         EFI_FILE_PROTOCOL *f = NULL;
         s = root->Open(root, &f, (CHAR16 *)MACOS_BOOT_PATH,
                        EFI_FILE_MODE_READ, 0);
-        root->Close(root);
         if (s == EFI_SUCCESS) {
             f->Close(f);
             *out_device = handles[i];
-            // Build a device path for LoadImage.
             found = build_file_device_path(st, handles[i],
                                            MACOS_BOOT_PATH, out_path);
-            break;
+            root->Close(root);
+            if (found == EFI_SUCCESS) break;
+            continue;
         }
+
+        // Tier 2: one level deep -- iterate directory entries at root,
+        // try <entry>\System\Library\CoreServices\boot.efi for each
+        // directory.  Matches APFS Preboot layout where each system
+        // volume has a UUID-named subdirectory.
+        s = root->SetPosition(root, 0);
+        if (s != EFI_SUCCESS) { root->Close(root); continue; }
+
+        EFI_FILE_PROTOCOL *found_file = NULL;
+        static CHAR16 full_path[128];
+        for (;;) {
+            static UINT8 dirent_buf[512];
+            UINTN dirent_sz = sizeof(dirent_buf);
+            s = root->Read(root, &dirent_sz, dirent_buf);
+            if (s != EFI_SUCCESS || dirent_sz == 0) break;
+
+            // EFI_FILE_INFO: size(u64) + filesize(u64) + physsize(u64) +
+            //                createtime(16) + lastaccess(16) + modtime(16) +
+            //                attrs(u64) + filename(CHAR16[])
+            UINT64 attrs = *(UINT64 *)(dirent_buf + 8*5 + 16*3);
+            CHAR16 *fname = (CHAR16 *)(dirent_buf + 8*6 + 16*3);
+
+            // Must be a directory, not "." or ".."
+            if (!(attrs & 0x10 /* EFI_FILE_DIRECTORY */)) continue;
+            if (fname[0] == L'.' && fname[1] == 0) continue;
+            if (fname[0] == L'.' && fname[1] == L'.' && fname[2] == 0) continue;
+
+            // Build "\<dir>\System\Library\CoreServices\boot.efi"
+            UINTN pos = 0;
+            full_path[pos++] = L'\\';
+            for (UINTN k = 0; fname[k] && pos < 120; k++)
+                full_path[pos++] = fname[k];
+            for (UINTN k = 0; MACOS_BOOT_SUFFIX[k] && pos < 127; k++)
+                full_path[pos++] = MACOS_BOOT_SUFFIX[k];
+            full_path[pos] = 0;
+
+            s = root->Open(root, &found_file, full_path,
+                           EFI_FILE_MODE_READ, 0);
+            if (s == EFI_SUCCESS) {
+                found_file->Close(found_file);
+                *out_device = handles[i];
+                found = build_file_device_path(st, handles[i],
+                                               full_path, out_path);
+                break;
+            }
+        }
+        root->Close(root);
+        if (found == EFI_SUCCESS) break;
     }
+
+    efi_print(st, L"[shim] find_macos_boot: probed ");
+    efi_print_dec(st, (UINTN)probed);
+    efi_print(st, L" non-removable SFS volume(s), ");
+    efi_print(st, (found == EFI_SUCCESS) ? L"FOUND\r\n" : L"NOT FOUND\r\n");
 
     st->BootServices->FreePool(handles);
     return found;
@@ -876,31 +940,21 @@ static void handle_nvram_state(EFI_SYSTEM_TABLE *st, EFI_HANDLE image,
 
     // -----------------------------------------------------------------------
     // TRIAL_PENDING_PAGE / TRIAL_PENDING_CHIP
-    // Auto-apply mask, set state to TRIAL_BOOTED, chain macOS.
-    // (The EFI menu should have branched us here automatically from grub
-    //  entry 1 when it detected these states.)
+    // Apply the mask and proceed to chainload macOS.  Do NOT advance state
+    // here: state stays TRIAL_PENDING_* so that if the shim crashes or
+    // boot.efi cannot be found, the user can try again (re-running this
+    // shim won't lose its work -- the NVRAM is still pristine from
+    // brr-entry.efi).  State only advances to TRIAL_BOOTED on a later
+    // deliberate step (install.efi --permanent, not part of trial flow).
     // -----------------------------------------------------------------------
     if (ascii_eq(state, STATE_TRIAL_PENDING_PAGE)) {
         efi_print(st, L"[shim] state=TRIAL_PENDING_PAGE: applying page mask\r\n");
-        // Mask sources: NVRAM BrrBadPages + badmem.txt (handled in main).
-        EFI_STATUS ss = mask_nvram_set_ascii(st, BRR_VARNAME_STATE,
-                                              STATE_TRIAL_BOOTED);
-        if (ss == EFI_SUCCESS)
-            efi_print(st, L"[shim] state -> TRIAL_BOOTED\r\n");
-        else
-            efi_print(st, L"[shim] WARNING: could not advance state to TRIAL_BOOTED\r\n");
         return;
     }
 
     if (ascii_eq(state, STATE_TRIAL_PENDING_CHIP)) {
         efi_print(st, L"[shim] state=TRIAL_PENDING_CHIP: applying chip mask\r\n");
         *force_chip = 1;
-        EFI_STATUS ss = mask_nvram_set_ascii(st, BRR_VARNAME_STATE,
-                                              STATE_TRIAL_BOOTED);
-        if (ss == EFI_SUCCESS)
-            efi_print(st, L"[shim] state -> TRIAL_BOOTED\r\n");
-        else
-            efi_print(st, L"[shim] WARNING: could not advance state to TRIAL_BOOTED\r\n");
         return;
     }
 
