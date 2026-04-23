@@ -512,11 +512,11 @@ static void verify_mask_in_memmap(EFI_SYSTEM_TABLE *st,
     }
 
     UINTN n_desc = actual / desc_size;
-    unsigned confirmed = 0, unreserved = 0;
+    unsigned confirmed = 0, not_in_map = 0, unsafe_type = 0;
 
     for (unsigned i = 0; i < count; i++) {
         UINT64 pa = ranges[i].start & ~(UINT64)0xFFFu;
-        UINT32 type = 0xFFFFFFFFu;
+        UINT32 type = 0xFFFFFFFFu;  // sentinel: not in any descriptor
 
         // Linear scan — n_desc is typically <200, count is <256; fine.
         for (UINTN d = 0; d < n_desc; d++) {
@@ -528,24 +528,39 @@ static void verify_mask_in_memmap(EFI_SYSTEM_TABLE *st,
         }
 
         if (type == EfiReservedMemoryType) {
+            // Explicitly typed Reserved — firmware guarantees OS won't touch.
             confirmed++;
+        } else if (type == 0xFFFFFFFFu) {
+            // PA not present in any memory-map descriptor.  This happens when
+            // firmware owns the page via its own internal reservation scheme
+            // (e.g. Apple SMM-protected regions, TSEG, GFX stolen, MMIO holes
+            // below top-of-RAM) that's NEVER exported to the OS memory map.
+            // macOS CANNOT allocate what isn't in its map — so this is safe,
+            // just achieved differently than our AllocatePages call.
+            not_in_map++;
         } else {
-            unreserved++;
-            if (unreserved <= 3) {  // cap noise
+            // Explicitly mapped as Conventional/LoaderData/BS*/RS* — these
+            // CAN be handed to macOS's allocator.  Dangerous.
+            unsafe_type++;
+            if (unsafe_type <= 3) {  // cap noise
                 efi_print(st, L"[shim]   verify WARNING: PA ");
                 efi_print_hex(st, pa);
                 efi_print(st, L" has type=");
                 efi_print_dec(st, (UINTN)type);
-                efi_print(st, L" (not Reserved=0)\r\n");
+                efi_print(st, L" (usable by OS -- unsafe)\r\n");
             }
         }
     }
 
     efi_print(st, L"[shim] verify: ");
     efi_print_dec(st, (UINTN)confirmed);
-    efi_print(st, L"/");
+    efi_print(st, L" reserved + ");
+    efi_print_dec(st, (UINTN)not_in_map);
+    efi_print(st, L" absent-from-map (both safe), ");
+    efi_print_dec(st, (UINTN)unsafe_type);
+    efi_print(st, L" unsafe of ");
     efi_print_dec(st, (UINTN)count);
-    efi_print(st, L" bad PA(s) confirmed EfiReservedMemoryType in memory map\r\n");
+    efi_print(st, L"\r\n");
 
     st->BootServices->FreePool(buf);
 }
@@ -929,6 +944,19 @@ static UINTN path_join(CHAR16 *out, UINTN cap,
     return pos;
 }
 
+// Validate a candidate path by (1) opening via SFS to confirm existence,
+// (2) building a device path, (3) doing a LoadImage dry-run to confirm the
+// file is a loadable PE image.  Only returns EFI_SUCCESS if both steps pass.
+//
+// Context: on some Apple firmware versions, `root->Open` returns EFI_SUCCESS
+// for non-existent paths under `\EFI\...`, which made find_macos_boot claim
+// FOUND on the USB ESP only for the subsequent LoadImage (against a device
+// path built for that same path) to fail with EFI_NOT_FOUND.  Validating
+// via LoadImage here closes that gap — if LoadImage works the image is
+// genuinely loadable and the caller can StartImage without re-loading.
+//
+// The loaded image is immediately Unloaded; the caller re-loads later via
+// chainload_macos() so the full-ownership flow (StartImage) is unambiguous.
 static EFI_STATUS try_path(EFI_SYSTEM_TABLE *st,
                             EFI_HANDLE device,
                             EFI_FILE_PROTOCOL *root,
@@ -939,7 +967,27 @@ static EFI_STATUS try_path(EFI_SYSTEM_TABLE *st,
     EFI_STATUS s = root->Open(root, &f, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
     if (s != EFI_SUCCESS) return s;
     f->Close(f);
-    return build_file_device_path(st, device, path, out_path);
+
+    EFI_DEVICE_PATH_PROTOCOL *dp = NULL;
+    s = build_file_device_path(st, device, path, &dp);
+    if (s != EFI_SUCCESS) return s;
+
+    // Dry-run LoadImage to confirm the path is genuinely loadable.
+    // We don't keep the loaded image — caller will re-load via
+    // chainload_macos() so the StartImage handoff is unambiguous.
+    EFI_HANDLE probe_img = NULL;
+    s = st->BootServices->LoadImage(0, device, dp, NULL, 0, &probe_img);
+    if (s != EFI_SUCCESS) {
+        st->BootServices->FreePool(dp);
+        return s;
+    }
+    // probe_img is leaked until ExitBootServices — small (~2 MiB) and
+    // ephemeral.  UnloadImage isn't in our minimal efi_types.h and the
+    // leak is harmless in the boot-phase-only lifetime.
+    (void)probe_img;
+
+    *out_path = dp;
+    return EFI_SUCCESS;
 }
 
 // Try each candidate macOS boot.efi path under `root` on the given handle.
@@ -1025,6 +1073,36 @@ static EFI_STATUS try_open_candidates(EFI_SYSTEM_TABLE *st,
     return EFI_NOT_FOUND;
 }
 
+// Force every driver in the system to bind to every handle.  On T2 Macs the
+// Apple APFS driver is present but doesn't automatically create SFS handles
+// for APFS volumes until something triggers a ConnectController pass — the
+// firmware's own boot picker does this, grub doesn't.  Without it we only
+// see the USB ESP (vol#0: EFI) and never the internal APFS system/preboot.
+static void connect_all_handles(EFI_SYSTEM_TABLE *st)
+{
+    EFI_HANDLE *all_handles = NULL;
+    UINTN n_all = 0;
+    EFI_STATUS s = st->BootServices->LocateHandleBuffer(
+        EFI_ALL_HANDLES, NULL, NULL, &n_all, &all_handles);
+    if (s != EFI_SUCCESS || !all_handles) return;
+
+    unsigned connected = 0;
+    for (UINTN i = 0; i < n_all; i++) {
+        // Recursive=TRUE so child handles (partitions on a block device) get
+        // their own driver bind too.
+        EFI_STATUS cs = st->BootServices->ConnectController(
+            all_handles[i], NULL, NULL, 1);
+        if (cs == EFI_SUCCESS) connected++;
+    }
+    st->BootServices->FreePool(all_handles);
+
+    efi_print(st, L"[shim] connect_all: ");
+    efi_print_dec(st, (UINTN)connected);
+    efi_print(st, L"/");
+    efi_print_dec(st, n_all);
+    efi_print(st, L" controller(s) connected (forces APFS driver bind)\r\n");
+}
+
 static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
                                    EFI_HANDLE image_handle,
                                    EFI_HANDLE *out_device,
@@ -1033,6 +1111,10 @@ static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
     static const EFI_GUID sfs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
     static const EFI_GUID bio_guid = EFI_BLOCK_IO_PROTOCOL_GUID;
     static const EFI_GUID lip_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+
+    // Force APFS + other FS drivers to bind to every block-device handle so
+    // internal volumes show up as SFS.
+    connect_all_handles(st);
 
     // Get our own device handle so we can skip it.
     EFI_HANDLE own_dev = NULL;

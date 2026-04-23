@@ -316,6 +316,22 @@ typedef EFI_STATUS (EFIAPI *EFI_GET_MEMORY_MAP)(
     UINTN                   *DescriptorSize,
     UINT32                  *DescriptorVersion);
 
+typedef EFI_STATUS (EFIAPI *EFI_CONNECT_CONTROLLER)(
+    EFI_HANDLE               ControllerHandle,
+    EFI_HANDLE              *DriverImageHandle,
+    EFI_DEVICE_PATH_PROTOCOL *RemainingDevicePath,
+    BOOLEAN                  Recursive);
+
+typedef EFI_STATUS (EFIAPI *EFI_LOCATE_HANDLE_BUFFER)(
+    UINT32           SearchType,
+    EFI_GUID        *Protocol,
+    void            *SearchKey,
+    UINTN           *NoHandles,
+    EFI_HANDLE     **Buffer);
+
+#define EFI_BY_PROTOCOL  2
+#define EFI_ALL_HANDLES  0
+
 #define EFI_LOCATE_BY_PROTOCOL  2
 
 #define EFI_VARIABLE_NON_VOLATILE           0x00000001
@@ -354,13 +370,13 @@ typedef struct {
     void                   *GetNextMonotonicCount;
     EFI_STALL               Stall;
     void                   *SetWatchdogTimer;
-    void                   *ConnectController;
+    EFI_CONNECT_CONTROLLER  ConnectController;
     void                   *DisconnectController;
     void                   *OpenProtocol;
     void                   *CloseProtocol;
     void                   *OpenProtocolInformation;
     void                   *ProtocolsPerHandle;
-    void                   *LocateHandleBuffer;
+    EFI_LOCATE_HANDLE_BUFFER LocateHandleBuffer;
     EFI_LOCATE_PROTOCOL     LocateProtocol;
     void                   *InstallMultipleProtocolInterfaces;
     void                   *UninstallMultipleProtocolInterfaces;
