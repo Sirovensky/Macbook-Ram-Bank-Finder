@@ -407,30 +407,33 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
                         // Auto-install if not already installed.  Idempotent
                         // via BrrBackupBootOrder presence check.
                         {
-                            static const EFI_GUID EGG = {
-                                0x8BE4DF61, 0x93CA, 0x11D2,
-                                { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C }
-                            };
+                            // Probe under BRR_GUID (same namespace where
+                            // install_mask_full writes the backup).
                             static UINT8 t2[8];
                             UINTN t2sz = sizeof(t2);
                             UINT32 t2a = 0;
                             EFI_STATUS qg = st->RuntimeServices->GetVariable(
                                 (CHAR16 *)L"BrrBackupBootOrder",
-                                (EFI_GUID *)&EGG, &t2a, &t2sz, t2);
+                                (EFI_GUID *)&BRR_GUID, &t2a, &t2sz, t2);
                             if (qg != EFI_SUCCESS && qg != EFI_BUFFER_TOO_SMALL) {
-                                efi_print(st, L"  Installing to internal ESP ...\r\n");
+                                efi_print(st, L"\r\n  Installing to internal ESP ...\r\n\r\n");
                                 const char *ierr = NULL;
                                 EFI_STATUS iis = install_mask_full(
                                     image_handle, st, &ierr);
+                                efi_print(st, L"\r\n");
                                 if (iis == EFI_SUCCESS) {
-                                    efi_print(st, L"  [install] OK\r\n");
+                                    efi_print(st, L"  [install] OK -- USB no longer required.\r\n");
                                     mask_nvram_set_ascii(st, BRR_VARNAME_STATE,
                                         BRR_STATE_TRIAL_PENDING_PAGE);
                                 } else {
-                                    efi_print(st, L"  [install] skipped: ");
+                                    efi_print(st, L"  [install] FAILED: ");
                                     if (ierr) efi_printa(st, ierr);
                                     else      efi_print_hex(st, (UINT64)iis);
-                                    efi_print(st, L"\r\n");
+                                    efi_print(st, L"  (status=");
+                                    efi_print_hex(st, (UINT64)iis);
+                                    efi_print(st, L")\r\n");
+                                    efi_print(st, L"  Photograph if you want help.  Continuing in 10 s.\r\n");
+                                    efi_stall_ms(st, 10000);
                                 }
                             }
                         }
@@ -557,43 +560,51 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     // Idempotent: if BrrBackupBootOrder already exists we were installed
     // previously, skip to avoid overwriting the saved pre-install state.
     {
-        static const EFI_GUID EFI_GLOBAL_GUID_LOCAL = {
-            0x8BE4DF61, 0x93CA, 0x11D2,
-            { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C }
-        };
+        // BrrBackupBootOrder is stored under BRR_GUID (not EFI_GLOBAL_GUID).
+        // An 8-byte probe buffer is intentional: if the var exists the call
+        // returns EFI_BUFFER_TOO_SMALL (buffer too small but var present),
+        // if absent it returns EFI_NOT_FOUND.
         static UINT8 tmp[8];
         UINTN tmp_sz = sizeof(tmp);
         UINT32 tmp_attr = 0;
         EFI_STATUS gs = st->RuntimeServices->GetVariable(
             (CHAR16 *)L"BrrBackupBootOrder",
-            (EFI_GUID *)&EFI_GLOBAL_GUID_LOCAL,
+            (EFI_GUID *)&BRR_GUID,
             &tmp_attr, &tmp_sz, tmp);
 
         if (gs == EFI_SUCCESS || gs == EFI_BUFFER_TOO_SMALL) {
             efi_print(st, L"  Already installed to internal ESP (skipping).\r\n");
         } else {
             efi_print(st, L"\r\n");
-            efi_print(st, L"  Installing to internal ESP so the mask runs on\r\n");
-            efi_print(st, L"  every future boot even WITHOUT the USB stick.\r\n");
+            efi_print(st, L"  ==============================================\r\n");
+            efi_print(st, L"   Installing to internal ESP\r\n");
+            efi_print(st, L"  ==============================================\r\n");
             efi_print(st, L"\r\n");
+            efi_print(st, L"  [install] calling install_mask_full() ...\r\n");
             const char *inst_err = NULL;
             EFI_STATUS is = install_mask_full(image_handle, st, &inst_err);
+            efi_print(st, L"\r\n");
+            efi_print(st, L"  [install] returned status=");
+            efi_print_hex(st, (UINT64)is);
+            efi_print(st, L"\r\n");
             if (is == EFI_SUCCESS) {
                 efi_print(st, L"  [install] OK -- USB no longer required.\r\n");
-                // install_mask_full sets state=PERMANENT_UNCONFIRMED to
-                // trigger the shim's Y/N prompt on first boot.  We revert
-                // to TRIAL_PENDING_PAGE so the shim takes the simpler page-
-                // mask branch silently.  Users can still run the installed
-                // revert.efi if they want to remove the BootNNNN entry.
                 mask_nvram_set_ascii(st, BRR_VARNAME_STATE,
                                       BRR_STATE_TRIAL_PENDING_PAGE);
+                efi_print(st, L"  Pausing 8 s so you can verify ...\r\n");
+                efi_stall_ms(st, 8000);
             } else {
-                efi_print(st, L"  [install] skipped: ");
+                efi_print(st, L"  [install] FAILED reason: ");
                 if (inst_err) efi_printa(st, inst_err);
-                else          efi_print_hex(st, (UINT64)is);
+                else          efi_print(st, L"(no err_msg set)");
                 efi_print(st, L"\r\n");
-                efi_print(st, L"  USB will be required for every future boot\r\n");
-                efi_print(st, L"  until T2 security permits internal ESP write.\r\n");
+                efi_print(st, L"\r\n");
+                efi_print(st, L"  USB will be required for every boot until\r\n");
+                efi_print(st, L"  T2 security permits internal ESP write.\r\n");
+                efi_print(st, L"\r\n");
+                efi_print(st, L"  Photograph this screen if you want help\r\n");
+                efi_print(st, L"  diagnosing.  Proceeding with USB-only flow in 15 s.\r\n");
+                efi_stall_ms(st, 15000);
             }
         }
     }
