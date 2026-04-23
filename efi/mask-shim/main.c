@@ -463,6 +463,94 @@ static EFI_STATUS mask_pages(EFI_SYSTEM_TABLE *st,
 }
 
 // ---------------------------------------------------------------------------
+// Post-mask memory-map verification.
+//
+// After mask_pages() runs, walk the UEFI memory map and confirm that each
+// bad-page address lands inside a descriptor with Type=EfiReservedMemoryType
+// (== 0).  This proves the AllocatePages calls actually registered in the
+// firmware memory map — catches any case where AllocatePages silently
+// succeeded without updating the map (shouldn't happen per spec, but the
+// user explicitly asked for verification proof).
+//
+// This is called in a non-aborting way: prints a one-line confirmation or
+// a warning per bad address, but never fails the boot.
+// ---------------------------------------------------------------------------
+static void verify_mask_in_memmap(EFI_SYSTEM_TABLE *st,
+                                   const badmem_range_t *ranges,
+                                   unsigned count)
+{
+    if (count == 0) return;
+
+    // Get memory map size first.
+    UINTN mm_size = 0, map_key = 0, desc_size = 0;
+    UINT32 desc_ver = 0;
+    EFI_STATUS s = st->BootServices->GetMemoryMap(
+        &mm_size, NULL, &map_key, &desc_size, &desc_ver);
+    if (s != EFI_BUFFER_TOO_SMALL || mm_size == 0 || desc_size == 0) {
+        efi_print(st, L"[shim] verify: cannot query memory map\r\n");
+        return;
+    }
+
+    // Allocate generous buffer (map grows during AllocatePool).
+    UINTN buf_size = mm_size + 8 * desc_size;
+    void *buf = NULL;
+    s = st->BootServices->AllocatePool(EfiLoaderData, buf_size, &buf);
+    if (s != EFI_SUCCESS) {
+        efi_print(st, L"[shim] verify: AllocatePool failed\r\n");
+        return;
+    }
+
+    UINTN actual = buf_size;
+    s = st->BootServices->GetMemoryMap(
+        &actual, (EFI_MEMORY_DESCRIPTOR *)buf, &map_key, &desc_size, &desc_ver);
+    if (s != EFI_SUCCESS) {
+        efi_print(st, L"[shim] verify: GetMemoryMap failed: ");
+        efi_print_hex(st, (UINT64)s);
+        efi_print(st, L"\r\n");
+        st->BootServices->FreePool(buf);
+        return;
+    }
+
+    UINTN n_desc = actual / desc_size;
+    unsigned confirmed = 0, unreserved = 0;
+
+    for (unsigned i = 0; i < count; i++) {
+        UINT64 pa = ranges[i].start & ~(UINT64)0xFFFu;
+        UINT32 type = 0xFFFFFFFFu;
+
+        // Linear scan — n_desc is typically <200, count is <256; fine.
+        for (UINTN d = 0; d < n_desc; d++) {
+            EFI_MEMORY_DESCRIPTOR *md =
+                (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)buf + d * desc_size);
+            UINT64 start = md->PhysicalStart;
+            UINT64 end   = start + md->NumberOfPages * 4096ULL;
+            if (pa >= start && pa < end) { type = md->Type; break; }
+        }
+
+        if (type == EfiReservedMemoryType) {
+            confirmed++;
+        } else {
+            unreserved++;
+            if (unreserved <= 3) {  // cap noise
+                efi_print(st, L"[shim]   verify WARNING: PA ");
+                efi_print_hex(st, pa);
+                efi_print(st, L" has type=");
+                efi_print_dec(st, (UINTN)type);
+                efi_print(st, L" (not Reserved=0)\r\n");
+            }
+        }
+    }
+
+    efi_print(st, L"[shim] verify: ");
+    efi_print_dec(st, (UINTN)confirmed);
+    efi_print(st, L"/");
+    efi_print_dec(st, (UINTN)count);
+    efi_print(st, L" bad PA(s) confirmed EfiReservedMemoryType in memory map\r\n");
+
+    st->BootServices->FreePool(buf);
+}
+
+// ---------------------------------------------------------------------------
 // Chip-level masking support.
 // ---------------------------------------------------------------------------
 
@@ -1549,6 +1637,9 @@ page_mode:
                 efi_print_dec(st, (UINTN)n_ranges);
                 efi_print(st, L" region range(s) to reserve\r\n");
                 mask_pages(st, ranges, n_ranges);
+                // Proof-of-reservation: re-read UEFI memory map and confirm
+                // each bad PA is actually typed EfiReservedMemoryType.
+                verify_mask_in_memmap(st, ranges, n_ranges);
             }
 
             if (n_chips > 0) {

@@ -309,6 +309,13 @@ typedef void (EFIAPI *EFI_RESET_SYSTEM)(
 
 typedef EFI_STATUS (EFIAPI *EFI_STALL)(UINTN Microseconds);
 
+typedef EFI_STATUS (EFIAPI *EFI_GET_MEMORY_MAP)(
+    UINTN                   *MemoryMapSize,
+    EFI_MEMORY_DESCRIPTOR   *MemoryMap,
+    UINTN                   *MapKey,
+    UINTN                   *DescriptorSize,
+    UINT32                  *DescriptorVersion);
+
 #define EFI_LOCATE_BY_PROTOCOL  2
 
 #define EFI_VARIABLE_NON_VOLATILE           0x00000001
@@ -321,7 +328,7 @@ typedef struct {
     void                   *RestoreTpl;
     EFI_ALLOCATE_PAGES      AllocatePages;
     EFI_FREE_PAGES          FreePages;
-    void                   *GetMemoryMap;
+    EFI_GET_MEMORY_MAP      GetMemoryMap;
     EFI_ALLOCATE_POOL       AllocatePool;
     EFI_FREE_POOL           FreePool;
     void                   *CreateEvent;
