@@ -1,3 +1,15 @@
+> **ARCHIVED 2026-04 — historical design reference only.**
+>
+> This document describes a 5-state install/trial/revert flow that was
+> partially implemented and then removed when the simpler 3-entry flow
+> (full test / fast test / brr-entry) was adopted.  NVRAM state names
+> and the AllocatePages primitive survived into the current design; the
+> automated state transitions described below did NOT.
+>
+> Current flow: see `README.md` and `docs/_internal/MASKING.md`.
+
+---
+
 # Seamless ram-fix flow — design
 
 ## User-visible

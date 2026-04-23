@@ -1,3 +1,13 @@
+> **ARCHIVED 2026-04 — original design plan, superseded.**
+>
+> Track A's 5-entry grub menu + trial/permanent install flow has been
+> replaced by a 3-entry flow (full test / fast test / brr-entry).
+> Track B's interactive pre-boot menu has been removed; user input
+> moved to brr-entry.efi (pre-EBS).  See `README.md` and
+> `docs/_internal/MASKING.md` for the current architecture.
+
+---
+
 # Plan: EFI bad-memory mask shim + keyboard input fix
 
 Two independent tracks. Can be dispatched to parallel sonnet sub-agents —

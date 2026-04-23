@@ -47,40 +47,36 @@ its own T2 HID driver (closed-source, part of the firmware).  Because
 GRUB runs before `ExitBootServices()`, it has full access to
 ConIn — which is why GRUB's menu navigation works perfectly on A1990.
 
-## Workaround (Track B)
+## Workaround (current implementation)
 
-Since ConIn works before `ExitBootServices()` and is the only reliable
-input path on A1990, the fix is to perform all interactive UI while boot
-services are still alive.
+ConIn works before `ExitBootServices()` and is the only reliable input
+path on A1990, so **all interactive UI in BRR happens pre-EBS**.
 
-`src/efi_menu.c` implements a pre-boot menu called from `boot/efisetup.c`
-immediately before `ExitBootServices()`.  The menu:
+Two places use ConIn:
 
-- Uses `SystemTable->ConIn->ReadKeyStroke()` for input.
-- Uses `SystemTable->ConOut->OutputString()` for text output.
-- Polls with `BootServices->Stall(10000)` (10 ms per tick) so it
-  does not busy-spin.
-- Waits 30 seconds for input, then defaults to "Run all tests".
+1. **`efi/brr-entry/main.c`** — the full line-editor for address entry
+   (entry 3 in grub).  Uses
+   `SystemTable->ConIn->ReadKeyStroke()` for hex digits and
+   backspace, `SystemTable->ConOut->OutputString()` for echo and
+   prompts.  Pre-EBS, so keyboard works reliably.
+2. **`efi/mask-shim/main.c`** — the `PERMANENT_UNCONFIRMED` Y/N
+   prompt.  Also pre-EBS.  Polls with `BootServices->Stall(10000)`
+   (10 ms per tick) on a 30 s timeout.
 
-The menu offers four choices:
+The earlier interactive pre-boot menu in `src/efi_menu.c` (with keys
+`[Enter]`/`[P]`/`[C]`/`[T]`/`[R]` + 30 s countdown) has been removed.
+`efi_menu()` is now a thin cmdline parser that returns
+`BRR_FLAG_SKIP_COUNTDOWNS` when grub passes `brr_fast`, otherwise 0.
+The flag bit is consumed by `src/calibration.c` to skip the photo-
+pause countdowns.
 
-| Key    | Action                                           |
-|--------|--------------------------------------------------|
-| Enter  | Run all memory tests (default / timeout)         |
-| C      | Run calibration dump only, then halt             |
-| R      | Reboot                                           |
-| T      | Fast mode: skip timed photo countdowns           |
-
-The chosen action is encoded as bit flags in `boot_params_t::a1990_flags`
-(offset `0x23c`, the first four bytes of the Linux boot protocol's
-unused "gap 7").  The application reads these flags after
-`ExitBootServices()` is long past and acts accordingly:
-
-- `A1990_FLAG_SKIP_COUNTDOWNS` (bit 0): `board_calibrate()` omits the
-  timed photo pauses so the calibration screens cycle immediately.
-- `A1990_FLAG_CALIBRATE_ONLY` (bit 1): `board_calibrate()` halts after
-  printing the calibration data (IMC registers + board ID) instead of
-  returning to start the memory tests.
+Historical note: the old menu stored its choice in
+`boot_params_t::brr_flags` (previously called `a1990_flags`, offset
+`0x23c` in the Linux boot protocol's gap 7).  That field still exists
+and still carries `SKIP_COUNTDOWNS` / `CALIBRATE_ONLY` flag bits; the
+other bits (`TRIAL_PAGE`, `TRIAL_CHIP`, `AUTO_REBOOT_AFTER_PASS`,
+`AUTO_TRIAL_CHIP`) are gone because no code writes or reads them
+anymore.
 
 ## Known limitations
 

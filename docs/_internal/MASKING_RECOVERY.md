@@ -1,4 +1,28 @@
-# Masking recovery guide
+> **ARCHIVED 2026-04 — scenarios below assume an install/trial
+> state machine that has been removed.**
+>
+> Current flow has no permanent install, no BootOrder override, no
+> internal-disk shim copy — the mask is applied fresh per boot from
+> the USB stick by `mask-shim.efi`.  Recovery in the current flow is
+> trivial:
+>
+> - If macOS boots OK masked — do nothing.
+> - If macOS panics — power off, retry entry 3 with different
+>   addresses (wider window, more addresses from the memtest pass).
+> - If you want to boot unmasked — unplug USB, power on; macOS boots
+>   without mask (and likely panics on the bad RAM, so only useful as
+>   a one-time diagnostic).
+> - If NVRAM is fouled — Cmd-Option-P-R clears it; re-run entry 3.
+>
+> The legacy scenarios below refer to states
+> (`PERMANENT_UNCONFIRMED`, installed `BootNNNN`, backup BootOrder,
+> `\EFI\BRR\` on internal ESP) that no code currently creates.  They
+> remain here as design reference for when the permanent-install
+> milestone lands.
+
+---
+
+# Masking recovery guide (legacy 5-state flow)
 
 This document covers every recovery scenario for the A1990 bad-RAM mask,
 from "I just want to go back to normal" to "my Mac won't boot at all."

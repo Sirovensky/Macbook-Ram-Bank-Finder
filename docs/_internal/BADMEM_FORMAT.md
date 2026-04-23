@@ -87,20 +87,35 @@ Region and chip entries may be mixed freely:
   `boot.efi` with no reservations (safe default).
 - The shim does **not** write to this file.
 
-## How to fill this file
+## How `badmem.txt` is used in the current flow
 
-### Region mode
+The 3-entry grub flow (see `README.md`) does **not** require editing
+`badmem.txt` by hand.  Users type bad addresses directly into
+`brr-entry.efi` (grub entry 3), which writes them to NVRAM via pre-EBS
+`SetVariable`.  `mask-shim.efi` reads NVRAM first, then optionally
+merges in any `badmem.txt` it finds on the same device it was loaded
+from (tries `\EFI\BRR\badmem.txt` then `\EFI\BOOT\badmem.txt`).
 
-1. Boot the USB.  Pick **entry 1 — Run memtest** from the grub menu.
-2. Let memtest run at least one pass.
-3. The final screen shows a block labelled `badmem.txt contents:` with
-   lines in the `0x...,4096` format.  Photograph the screen.
-4. On a working Mac, mount the USB, open `/EFI/BOOT/badmem.txt` in a
-   text editor, and paste in the lines you photographed.
-5. Save, eject USB.
+So `badmem.txt` is a **secondary** path, useful for:
 
-### Chip mode
+- **Pinned addresses.** If you ship a stick to another A1990 user, you
+  can pre-populate `badmem.txt` on the ESP so the shim masks those
+  addresses even if the user skips the brr-entry step.
+- **Chip-mode directives.** NVRAM currently stores only pages; chip
+  designators (`U2xxx`) must be listed in `badmem.txt` as
+  `# chip: U2xxx` lines to trigger chip-mode masking.  Chip-mode is
+  coarse (masks one full channel per bad chip = 16 GiB on A1990); use
+  only when a chip is failing rapidly across many pages.
 
-Instead of individual page addresses, identify the failing chip
-designator from the calibration screen or the error log (the designator
-column shows `U2xxx`), then add a `# chip: U2xxx` line.
+### Editing `badmem.txt` after a flash
+
+1. Boot any computer (not the A1990).
+2. Mount the USB stick's ESP (the FAT partition).
+3. Create or open `\EFI\BOOT\badmem.txt`.  Each line is either:
+   - `0x<address>,4096` — reserve the 4 KiB page at that PA.  The
+     shim also expands the range by `+/-1 MiB` at mask-apply time.
+   - `# chip: U2320` — reserve every page decoding to chip U2320.
+   - `# <text>` — comment, ignored.
+4. Save, unmount, eject.
+
+No `badmem.txt` == "NVRAM-only mode", which is the default.
