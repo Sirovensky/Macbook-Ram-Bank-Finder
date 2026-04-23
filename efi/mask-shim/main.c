@@ -1068,6 +1068,133 @@ static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
 }
 
 // ---------------------------------------------------------------------------
+// BootOrder fallback: iterate firmware-registered boot options and try the
+// first that LoadImages successfully (skipping our own USB entry).
+//
+// EFI_LOAD_OPTION layout (per UEFI spec §3.1.3):
+//   UINT32                     Attributes
+//   UINT16                     FilePathListLength
+//   CHAR16                     Description[] (null-terminated)
+//   EFI_DEVICE_PATH_PROTOCOL   FilePathList[]  (may be multi-instance)
+//   UINT8                      OptionalData[]
+//
+// We skip options whose Description contains L"USB" or the substring L"BRR"
+// (avoid recursing into ourselves if we got registered).
+// ---------------------------------------------------------------------------
+
+static const EFI_GUID BS_GLOBAL_GUID_LOCAL = {
+    0x8BE4DF61, 0x93CA, 0x11D2,
+    { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C }
+};
+
+static int u16_contains(const CHAR16 *hay, const CHAR16 *needle)
+{
+    if (!hay || !needle) return 0;
+    for (UINTN i = 0; hay[i]; i++) {
+        UINTN j = 0;
+        while (hay[i + j] && needle[j] && hay[i + j] == needle[j]) j++;
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+static EFI_STATUS try_bootorder_chainload(EFI_SYSTEM_TABLE *st, EFI_HANDLE self)
+{
+    // Read BootOrder.
+    static UINT8 order_buf[512];
+    UINTN order_sz = sizeof(order_buf);
+    UINT32 attrs = 0;
+    EFI_STATUS s = st->RuntimeServices->GetVariable(
+        (CHAR16 *)L"BootOrder", (EFI_GUID *)&BS_GLOBAL_GUID_LOCAL,
+        &attrs, &order_sz, order_buf);
+    if (s != EFI_SUCCESS || order_sz < 2) return EFI_NOT_FOUND;
+
+    UINT16 *order = (UINT16 *)order_buf;
+    UINTN n_entries = order_sz / 2;
+
+    efi_print(st, L"[shim] BootOrder fallback: ");
+    efi_print_dec(st, n_entries);
+    efi_print(st, L" entries\r\n");
+
+    for (UINTN i = 0; i < n_entries; i++) {
+        UINT16 slot = order[i];
+
+        // Build L"Boot%04X" name.
+        static const CHAR16 hex_digits[] = L"0123456789ABCDEF";
+        CHAR16 name[9];
+        name[0] = L'B'; name[1] = L'o'; name[2] = L'o'; name[3] = L't';
+        name[4] = hex_digits[(slot >> 12) & 0xF];
+        name[5] = hex_digits[(slot >>  8) & 0xF];
+        name[6] = hex_digits[(slot >>  4) & 0xF];
+        name[7] = hex_digits[(slot >>  0) & 0xF];
+        name[8] = 0;
+
+        static UINT8 opt_buf[4096];
+        UINTN opt_sz = sizeof(opt_buf);
+        UINT32 oattrs = 0;
+        s = st->RuntimeServices->GetVariable(
+            name, (EFI_GUID *)&BS_GLOBAL_GUID_LOCAL,
+            &oattrs, &opt_sz, opt_buf);
+        if (s != EFI_SUCCESS || opt_sz < 8) continue;
+
+        // Parse EFI_LOAD_OPTION header.
+        UINT16 fpl_len = (UINT16)opt_buf[4] | ((UINT16)opt_buf[5] << 8);
+        CHAR16 *desc = (CHAR16 *)(opt_buf + 6);
+        // Walk to end of desc (null-terminated CHAR16).
+        UINTN di = 0;
+        while ((UINTN)(6 + (di + 1) * 2) < opt_sz && desc[di] != 0) di++;
+        UINTN desc_bytes = (di + 1) * 2;
+
+        // Device path follows description.
+        UINT8 *dp = opt_buf + 6 + desc_bytes;
+        if ((UINTN)(dp - opt_buf) + fpl_len > opt_sz) continue;
+
+        // Skip obvious non-candidates.
+        if (u16_contains(desc, L"USB")) {
+            efi_print(st, L"[shim]   ");
+            efi_print(st, name);
+            efi_print(st, L": skip (USB)\r\n");
+            continue;
+        }
+        if (u16_contains(desc, L"BRR") || u16_contains(desc, L"mask")) {
+            efi_print(st, L"[shim]   ");
+            efi_print(st, name);
+            efi_print(st, L": skip (self)\r\n");
+            continue;
+        }
+
+        efi_print(st, L"[shim]   ");
+        efi_print(st, name);
+        efi_print(st, L": ");
+        efi_print(st, desc);
+        efi_print(st, L"\r\n");
+
+        EFI_HANDLE new_image = NULL;
+        EFI_STATUS ls = st->BootServices->LoadImage(
+            0, self, (EFI_DEVICE_PATH_PROTOCOL *)dp, NULL, 0, &new_image);
+        if (ls != EFI_SUCCESS) {
+            efi_print(st, L"[shim]     LoadImage failed: ");
+            efi_print_hex(st, (UINT64)ls);
+            efi_print(st, L"\r\n");
+            continue;
+        }
+
+        efi_print(st, L"[shim]     chainloading...\r\n");
+        UINTN exit_sz = 0;
+        CHAR16 *exit_data = NULL;
+        ls = st->BootServices->StartImage(new_image, &exit_sz, &exit_data);
+        efi_print(st, L"[shim]     returned: ");
+        efi_print_hex(st, (UINT64)ls);
+        efi_print(st, L"\r\n");
+        // If StartImage returned, macOS panicked or user selected
+        // something; no point trying other entries.
+        return ls;
+    }
+
+    return EFI_NOT_FOUND;
+}
+
+// ---------------------------------------------------------------------------
 // Chain-load macOS.
 // ---------------------------------------------------------------------------
 
@@ -1438,20 +1565,26 @@ page_mode:
         }
     }
 
-    // 3. Find macOS boot.efi.
+    // 3a. Primary: enumerate SFS volumes for boot.efi at known paths.
     EFI_HANDLE boot_device = NULL;
     EFI_DEVICE_PATH_PROTOCOL *boot_path = NULL;
     EFI_STATUS s = find_macos_boot(st, image, &boot_device, &boot_path);
-    if (s != EFI_SUCCESS) {
-        efi_print(st, L"[shim] ERROR: macOS boot.efi not found\r\n");
-        efi_print(st, L"  Is internal SSD present? Is T2 security set correctly?\r\n");
-        efi_stall_ms(st, 10000);
-        return s;
+    if (s == EFI_SUCCESS) {
+        efi_print(st, L"[shim] found macOS boot.efi\r\n");
+        efi_stall_ms(st, 1000);
+        return chainload_macos(st, image, boot_device, boot_path);
     }
 
-    efi_print(st, L"[shim] found macOS boot.efi\r\n");
-    efi_stall_ms(st, 1000);
+    // 3b. Fallback: try UEFI BootOrder.  Apple firmware registers
+    // internal macOS under a Boot#### entry; if SFS scan missed it
+    // (unusual APFS layout, firmware quirk), the registered device
+    // path is authoritative.
+    efi_print(st, L"[shim] primary scan failed, trying BootOrder...\r\n");
+    s = try_bootorder_chainload(st, image);
+    if (s == EFI_SUCCESS) return s;
 
-    // 4. Chain-load macOS.
-    return chainload_macos(st, image, boot_device, boot_path);
+    efi_print(st, L"[shim] ERROR: macOS boot.efi not found\r\n");
+    efi_print(st, L"  Is internal SSD present? Is T2 security set correctly?\r\n");
+    efi_stall_ms(st, 10000);
+    return EFI_NOT_FOUND;
 }
