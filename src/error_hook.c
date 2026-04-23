@@ -152,10 +152,12 @@ static void decode_and_log_one(uint64_t addr)
 
 // Called from app/main.c at end of each pass (patch 0005/0009 area),
 // single-threaded on CPU 0.  Walks badmem_log entries, decodes each,
-// populates BrrBadChips and BrrBadRows accumulators, and prints a
-// one-line human-readable summary.  The NVRAM flush in
-// badmem_log_flush_nvram + badmem_log_flush_rows_nvram then persists
-// both lists.
+// and prints a one-line human-readable summary per bad page (PA +
+// channel/rank + suspect chip designator).  The accumulator tables
+// (chips, rows) are populated but NO post-EBS NVRAM write occurs --
+// post-EBS Runtime SetVariable does not persist on Apple T2, so the
+// actual NVRAM write happens later in brr-entry.efi from the manual
+// address-entry UI.  This function's output is what the user photographs.
 void board_decode_pass(void)
 {
     extern uint64_t *badmem_log_entries(unsigned *out_count);

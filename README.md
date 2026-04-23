@@ -1,289 +1,336 @@
 # BizarreRamRepair (BRR)
 
-Bootable USB/ISO that identifies which exact soldered BGA DRAM chip has
-failed on a MacBook Pro A1990 (15" 2018/2019), and hides the bad pages
-— or the entire failing chip's memory region — from macOS without
-kernel patches.
+Bootable USB/ISO for the **2018 MacBook Pro 15" (A1990)** that diagnoses
+failing soldered DRAM, hides the bad cells from macOS via a pre-boot EFI
+shim, and lets the Mac keep running without a motherboard swap.
 
 Base: fork of [memtest86plus](https://github.com/memtest86plus/memtest86plus)
-plus a Coffee Lake-H IMC physical-address decoder, per-board topology
-overlay, and an EFI mask-shim that calls
-`AllocatePages(AllocateAddress, EfiReservedMemoryType, ...)` before
-`ExitBootServices` so macOS sees the bad ranges as firmware-owned and
+plus a Coffee Lake-H IMC physical-address decoder, per-board BGA
+topology overlay, and an EFI `mask-shim.efi` that calls
+`AllocatePages(AllocateAddress, EfiReservedMemoryType, ...)` **before**
+`ExitBootServices` so macOS sees the bad pages as firmware-owned and
 never allocates from them.
 
 ---
 
-## How it works (one screen)
+## TL;DR
 
-```
-USB stick boots -> grub picks entry 1 (Automatic) after 15 s
-  -> memtest pre-boot menu (T2 internal keyboard works via UEFI ConIn)
-  -> press [P] page-mask  or  [C] chip-mask
-  -> memtest runs 1 pass, writes bad PAs/chips to NVRAM, auto-reboots
-  -> next USB boot: shim applies trial mask + chains macOS
-  -> use macOS normally; verify stability
-  -> restart to USB: menu shows "Install permanently? Y/N"; press Y, Y
-  -> install.efi backs up BootOrder, copies shim to internal disk, reboots
-  -> macOS boots masked forever; revert available via grub entry 4
-```
+1. Flash the ISO to a USB stick. Boot it. **Entry 1** (full test) runs
+   memtest for ~30-60 min on 32 GiB and prints the bad-address list.
+2. Photograph the bad addresses.
+3. Power off. Boot the USB again. Pick **entry 3** (Setup NVRAM hook +
+   apply mask). Type the addresses in. Press **Y**.
+4. The tool writes NVRAM (persists on T2), chainloads the mask-shim,
+   which reserves `+/-1 MiB` around each address, then chainloads
+   macOS `boot.efi`. macOS boots with those pages already marked reserved
+   and never touches them.
 
-No screen photography.  No second computer.  No `badmem.txt` editing.
+No screen patching. No motherboard swap. No kernel extension.
 
 ---
 
 ## Requirements
 
-- MacBook Pro A1990 (15-inch 2018 or 2019).  Other T2 Coffee Lake Macs
-  may work with a topology YAML — community contributions welcome.
-- T2 Startup Security Utility: **No Security** + **Allow external boot**.
-- USB stick ≥ 512 MB.
+- MacBook Pro A1990 (15-inch 2018 or 2019). Other T2 Coffee Lake Macs
+  may work with a new board topology YAML — see `topology/`.
+- T2 Startup Security Utility must allow **external boot**.
+  "Reduced Security" is enough. "No Security" is safest.
+- USB stick >= 256 MB.
+- You can hold **Option** at boot to reach the UEFI boot picker. (If the
+  Mac won't POST at all, this project can't help — the bad cells must
+  be sparse enough that firmware init succeeds.)
 
 ---
 
-## Use flow
-
-### 1. Detect
-
-Boot the USB stick.  Grub's first entry, **Automatic: memtest + ram-fix**,
-auto-selects after 15 s.  Memtest starts loading and shows the pre-boot
-menu with a 30-second countdown:
+## The three grub entries
 
 ```
-  BRR Memtest -- press a key (timeout 30 s -> Run tests)
-
-    [Enter]  Run all tests (no auto-apply)
-    [P]      Automatic: page-mask  (one pass, NVRAM save, auto-reboot)
-    [C]      Automatic: chip-mask  (one pass, save bad chips, auto-reboot)
-    [T]      Fast mode (skip countdowns, run all tests, no auto-apply)
-    [R]      Reboot
+1. Full test  (all patterns, ~30-60 min) [DEFAULT]
+2. Fast test  (3 patterns, ~5 min)
+3. Setup NVRAM hook + apply mask
 ```
 
-Pick **[P]** or **[C]**:
+### Entry 1 — Full test (recommended)
 
-| Mode | Effect |
-|---|---|
-| `[P]` page | Reserves only the 4 KiB pages that fail.  Minimal RAM loss. |
-| `[C]` chip | Reserves every PA mapping to the failing chip's channel. On A1990 (1-rank per channel) this masks one full channel = 16 GiB.  Much safer against progressive cell decay; half the RAM. |
-
-Memtest runs one full pass with countdowns skipped (30-60 min typical on
-32 GB).  Each detected error prints a line identifying channel, byte
-lane, and — when the board overlay matches — the exact chip designator
-(e.g. `U2620`).  At the end of the pass:
-
-- Bad addresses written to NVRAM as `BrrBadPages`.
-- In chip mode, chip designators written as `BrrBadChips`.
-- `BrrMaskState = "TRIAL_PENDING_PAGE"` (or `CHIP`).
-- Machine reboots automatically in 5 s.
-
-### 2. Trial
-
-On the next boot of the USB stick, grub re-selects entry 1.  The
-pre-boot menu detects the `TRIAL_PENDING_*` state and silently
-chain-loads `mask-shim.efi`.  The shim:
-
-- Reads `BrrBadPages` (page mode) and/or `BrrBadChips` (chip mode).
-- For chip entries: walks physical address space via MCHBAR, reserves
-  every 4 KiB page mapping to the bad chip's (channel, rank).
-- Calls `AllocatePages(AllocateAddress, EfiReservedMemoryType, ...)`.
-- Advances state to `TRIAL_BOOTED`.
-- Chain-loads internal macOS `boot.efi`.
-
-macOS boots with the reserved ranges treated as firmware-owned.  Use
-macOS normally.  Watch for panics, filesystem corruption, or freezes.
-If anything goes wrong, just reboot without the USB — the mask only
-applies when the shim runs.
-
-### 3. Permanent install (double confirm)
-
-Once macOS has been stable, boot the USB stick again.  The pre-boot
-menu detects `TRIAL_BOOTED`:
+Runs all 13 memtest patterns. On a 32 GiB A1990 this is 30-60 minutes.
+At pass end you get a block like:
 
 ```
-========================================================
-  Trial mask was applied in previous boot (TRIAL_BOOTED)
-========================================================
-  If macOS booted + ran correctly, you can install the
-  mask PERMANENTLY (writes to internal disk + EFI NVRAM).
+BAD ADDRESSES (3 found) -- photograph this line:
+0xb21df000, 0xb21e0000, 0xb2200000
 
-  Install mask permanently? [Y/N, 30 s timeout = N]:
+Next: power off, boot USB, pick entry 3.
 ```
 
-Press **Y**.  A second prompt appears — **Really install permanently?
-EFI will be modified**.  Press **Y** again.
+Memtest halts — no auto-reboot. Photograph the address line with your
+phone. Power off.
 
-The menu chain-loads `install.efi`.  The installer:
-
-- Pre-flight: trial `SetVariable` to confirm NVRAM is writable.
-  Aborts cleanly on Medium/Full Security.
-- Shows its own detailed confirmation (also 30 s timeout) — press Y.
-- Copies `mask-shim.efi` and `badmem.txt` to `\EFI\BRR\` on the
-  internal ESP.  Pre-existing `\EFI\BRR\` contents are first moved
-  to `\EFI\BRR\backup\` so a later revert can restore them.
-- Saves current `BootOrder` as `BrrBackupBootOrder`.
-- Enumerates existing `Boot*` EFI variables, saves the list as
-  `BrrBackupBootEntries`.
-- Creates a new `BootNNNN` variable pointing at the internal shim.
-- Prepends it to `BootOrder`.
-- Sets `BrrMaskState = "PERMANENT_UNCONFIRMED"`.
-- Reboots in 3 s.
-
-On any step failure the installer rolls back everything written so far
-and aborts — no half-committed state.
-
-### 4. Post-install confirm
-
-First non-USB boot after install: firmware launches the internal shim.
-Shim reads `PERMANENT_UNCONFIRMED` and asks:
+Each error line earlier in the pass also identifies the chip
+designator, e.g.:
 
 ```
-  BRR mask shim installed (PERMANENT_UNCONFIRMED).
-  Did macOS boot correctly with the memory mask?
-    Y = confirm installation (permanent)
-    N = uninstall and boot without mask
-    (timeout -> proceed; prompt repeats next boot)
+    b21df000  ch0 rk0  chip: U2320
 ```
 
-- **Y** — state becomes `PERMANENT_CONFIRMED`.  Silent on every future
-  boot.
-- **N** — shim uninstalls itself inline (deletes `\EFI\BRR\`, restores
-  `BootOrder`, deletes NVRAM state), chain-loads macOS.  USB not
-  needed.
-- **Timeout** — shim proceeds and asks again next boot.
+So you also know which physical BGA on the mainboard is bad. This is
+informational (used when sending the board for repair/reflow); the
+mask is applied by address, not by chip.
 
-### 5. Revert
+### Entry 2 — Fast test
 
-Any time, from the USB stick, pick grub entry **4. Revert all changes
-\[REVERT\]**.  `revert.efi`:
+Same output format, 3 patterns only, ~5 min. Good sanity check; the
+full test is the real one.
 
-- Asks once for confirmation (Y within 30 s).
-- Deletes `\EFI\BRR\*` from internal ESP (restoring backup if present).
-- Restores original `BootOrder` from `BrrBackupBootOrder` (falls back
-  to legacy `A1990MaskOriginalBootOrder` for old installs).
-- Deletes our `BootNNNN` variable.
-- Deletes all BRR NVRAM vars (and legacy `A1990*` equivalents).
-- Reboots.
+### Entry 3 — Setup NVRAM hook + apply mask
 
-Idempotent: safe to run from any state, including `NONE`.
+Loads `brr-entry.efi` pre-ExitBootServices. It:
+
+1. Checks NVRAM for an existing saved mask. If present it offers
+   **quick-retry**: press **Y** to re-apply without re-typing.
+2. Otherwise prompts for comma-separated hex addresses (0x optional).
+3. Writes `BrrBadPages` to NVRAM via Boot Services `SetVariable`
+   (persists on T2; Runtime Services `SetVariable` does **not**).
+4. Writes `BrrMaskState = "TRIAL_PENDING_PAGE"`.
+5. Chainloads `mask-shim.efi`.
+
+The shim reads NVRAM + optional `badmem.txt`, calls
+`AllocatePages(EfiReservedMemoryType)` on every page in the
+`+/- 1 MiB` window around each bad address (rounded to 4 KiB), then
+chainloads the internal macOS `boot.efi`.
+
+**If chainload fails** (e.g. `boot.efi` not located — fixable, see
+_Troubleshooting_), NVRAM stays intact. Hard-reboot, re-pick entry 3,
+press **Y** at the quick-retry prompt, and retry.
 
 ---
 
-## Grub menu
+## What actually persists
 
-```
-1. Automatic: memtest + ram-fix     [DEFAULT, 15 s timeout]
-2. Run memtest only (diagnostic)
-3. Boot macOS normally (no mask)
-4. Revert all changes               [REVERT]
-```
+| Thing | Where | Persists across | Who sets it |
+|---|---|---|---|
+| `BrrBadPages` | NVRAM (vendor GUID `3E3E9DB2-1A2B-4B5C-9D1E-5F6A7B8C9D0E`) | power-off and reboot | `brr-entry.efi` |
+| `BrrMaskState` | same GUID | same | `brr-entry.efi` / `mask-shim.efi` |
+| Reserved pages | UEFI memory map (EfiReservedMemoryType) | **only until next reboot** | `mask-shim.efi` |
 
-Entry 2 loads the same memtest — use it to re-test without triggering
-the auto-trial flow (press `[Enter]` in the pre-boot menu).  Entry 3
-loads `mask-shim --passthrough`, skipping all masking and chain-loading
-macOS directly (useful for A/B comparison).
-
----
-
-## Recovery
-
-| Situation | Fix |
-|---|---|
-| USB available, want to undo | Boot USB, pick entry 4 |
-| USB lost | NVRAM reset (Cmd+Opt+P+R) clears the `BootOrder` override; rebuild USB and pick entry 4 |
-| Boot loop after install | Cmd+Opt+P+R.  Or macOS Recovery (⌘R) + `sudo bless --folder /Volumes/Macintosh\ HD --setBoot` |
-| macOS upgrade breaks install | Boot USB, entry 4, then reinstall after upgrade completes |
-
-NVRAM vars under vendor GUID `3E3E9DB2-1A2B-4B5C-9D1E-5F6A7B8C9D0E`:
-
-| Var | Meaning |
-|---|---|
-| `BrrMaskState` | `NONE`, `TRIAL_PENDING_{PAGE,CHIP}`, `TRIAL_BOOTED`, `PERMANENT_UNCONFIRMED`, `PERMANENT_CONFIRMED` |
-| `BrrBadPages` | Binary: `[uint32 version=1][uint32 count][uint64 PAs...]` |
-| `BrrBadChips` | comma-separated ASCII chip designators |
-| `BrrBackupBootOrder` | Saved BootOrder for revert |
-| `BrrBackupBootEntries` | Pre-install list of Boot* slots |
-| `BrrBootSlot` | Our BootNNNN slot number |
+The pages are reserved ONLY for the macOS session that `mask-shim`
+chainloaded. Every reboot the shim has to run again. That's why the
+current design runs the shim from USB on every boot; a future
+`install.efi` will install the shim on the internal ESP + register a
+`BootNNNN` override so the shim auto-runs without USB. That's the
+next milestone, not shipped yet.
 
 ---
 
-## Granularity: region vs chip
+## Reading a mask-shim transcript
 
-| Mode | RAM cost (A1990 32 GB) | Safety against progressive failure |
-|---|---|---|
-| Page (`[P]`) | ~4 KiB per detected error | Low — more cells may fail |
-| Chip (`[C]`) | 16 GiB (entire channel) | High — all addresses mapping to failing chip are masked |
+```
+BRR mask-shim v1
+=====================================
+[shim] state=TRIAL_PENDING_PAGE: applying page mask
+[mask] loaded 3 page(s) from NVRAM, 0 range(s) from badmem.txt
+[shim] 3 region range(s) to reserve
+[shim] mask coverage: 3/3 range(s) fully covered
+[shim]   new reserves: 1024 page(s)  (each +/-1 MiB around bad addr)
+[shim]   firmware pre-reserved: 512 page(s)  (already OFF-LIMITS to macOS)
+[shim]  vol#0: EFI, .fseventsd
+[shim]  vol#1: 5A1B3...
+[shim]  vol#2: com.apple.r...
+...
+[shim] find_macos_boot: probed 6 volume(s) (skipped 1 self, 0 removable), FOUND
+[shim] found macOS boot.efi
+[shim] starting macOS boot.efi...
+```
 
-A failing DRAM cell often spreads — once one bit goes, neighbouring
-cells and adjacent rows frequently follow within weeks.  Chip mode
-trades RAM for robustness.
+### Coverage line
 
-On A1990: 2 channels × 1 rank × 8 × 2 GB (Micron MT40A2G8-NRE).  Chips:
-`U2300..U2430` = CH-A, `U2500..U2630` = CH-B.  See
-`topology/820-01814-a.yaml` for the verified byte-lane mapping.
+`mask coverage: N/M range(s) fully covered` — N ranges have **every**
+page in the `+/-1 MiB` window either newly-reserved by us or
+pre-reserved by firmware. If M != N you'll also see:
+
+```
+[shim]   WARNING: 42 page(s) in 1 range(s) NOT protected -- unsafe!
+```
+
+That means some pages in the mask window returned an error from
+`AllocatePages` that wasn't "already reserved" (e.g. out-of-RAM
+region, invalid parameter). Rare — usually the bad address was typed
+wrong. Retry entry 3 with correct addresses.
+
+### Volume peek
+
+`vol#N: A, B, C` shows the first three non-dot child names found at
+the root of SFS volume N. On an APFS Preboot volume you'll see
+UUID-looking strings (e.g. `5A1B3...`). On the ISO FAT-ESP you'll see
+`EFI`. This helps diagnose `NOT FOUND` remotely — photograph this
+line and the path the finder used.
 
 ---
 
 ## Build
 
-Docker required; works on macOS and Linux hosts.
+Requires Docker. Works on macOS and Linux hosts.
 
 ```
-./scripts/docker-build.sh iso
-# produces dist/a1990-memtest.iso
+make docker-iso
+# -> dist/a1990-memtest.iso
 ```
 
 Flash:
 
-```
-# find device
-diskutil list external            # macOS
-lsblk                             # Linux
-
-# unmount + dd (replace N)
+```sh
+# macOS
+diskutil list external
 sudo diskutil unmountDisk /dev/diskN
 sudo dd if=dist/a1990-memtest.iso of=/dev/rdiskN bs=4m status=progress
 sync && diskutil eject /dev/diskN
+
+# Linux
+lsblk
+sudo dd if=dist/a1990-memtest.iso of=/dev/sdN bs=4M status=progress conv=fsync
 ```
 
-Or use [balenaEtcher](https://www.balena.io/etcher/) / [Rufus](https://rufus.ie/).
+Or balenaEtcher / Rufus.
+
+Hosted unit test (no Docker needed):
+
+```
+make test-shim
+```
+
+Runs the badmem.txt parser against fixtures — useful when hacking
+`efi/badmem_parse.c`.
 
 ---
 
-## Contributing a new board
+## Troubleshooting
 
-Drop boardview + schematic under `boardviews/` and `vendor/` (both
-git-ignored).  Run `scripts/trace-dq.py` on a `pdftotext -layout` dump
-of the schematic to derive per-chip byte-lane mapping.  Add
-`topology/<board-id>.yaml` following `topology/820-01814-a.yaml`.
-Rebuild — no code changes needed; the board table auto-links.
+### "Could not chainload mask-shim"
 
-The IMC PA decoder in `src/cfl_decode.c` covers Coffee Lake / Kaby
-Lake / Skylake client.  Ice Lake / Tiger Lake / Alder Lake / Raptor
-Lake each need their own decoder; FSP-blob memory init means each
-platform's `MAD_DIMM` / `MAD_INTRA` bit layouts must be
-reverse-engineered.
+brr-entry failed to `LoadImage` or `StartImage` the shim. Usually
+the USB stick was reformatted / mask-shim.efi missing. Check the ISO
+was flashed complete (compare SHA-256 to the one printed at build
+end).
+
+### "[shim] ERROR: macOS boot.efi not found"
+
+The shim couldn't locate `boot.efi` on any APFS volume. Causes:
+
+- **Internal SSD disconnected / missing** — common after logic-board
+  work. Check that macOS still shows the disk in Disk Utility when
+  booted normally.
+- **T2 Full Security** — prevents external boot from seeing internal
+  APFS volumes. Change to "Reduced" or "No Security" in Recovery
+  (Cmd-R at boot).
+- **Unusual APFS layout** — the shim tries 3 tiers of paths (root,
+  1-level, 2-level) plus alternates (`\com.apple.recovery.boot\...`,
+  `\usr\standalone\i386\...`). If all miss, photograph the `vol#N`
+  diagnostic lines — they reveal what's actually at each volume root.
+
+NVRAM stays intact on shim failure. You can hard-reboot and either:
+
+- Re-pick entry 3 → **Y** quick-retry.
+- Unplug USB, power on, macOS boots **unmasked** (so a pre-existing
+  bad cell will likely panic). Only safe if you don't boot at all.
+- Hold Option at boot, pick macOS manually — same caveat.
+
+### macOS kernel panic
+
+Happens when macOS tries to use a bad page that wasn't masked. Means
+the mask window was too narrow OR you missed an address on the
+memtest list. Boot USB entry 1 again, full test; every additional
+hit widens the mask.
+
+### T2 NVRAM got wiped
+
+Possible causes:
+- Cmd-Option-P-R at boot (user-initiated NVRAM reset).
+- SMC reset combined with firmware update.
+- Battery disconnect on some repairs.
+
+Re-type your addresses in entry 3 — no big deal.
+
+---
+
+## How it works under the hood
+
+### 1. Address capture
+
+`memtest86plus` runs the RAM tests; on each miscompare it calls our
+hook `board_report_error(pa, xor_bits)` which appends the PA to a
+static array. At pass end on CPU 0 we decode each PA through the
+Coffee Lake IMC register map to a `(channel, rank, bank, row)` tuple
+and cross-reference `board_topology.c` to identify the specific BGA
+designator. We then print the bad-address list in `%x, %x, %x` format
+for the user to photograph.
+
+No NVRAM write during the memtest pass — `common_err()` holds
+`error_mutex` across the hook, and any display-side work can block
+on `scroll()`. Heavy decoding happens once, post-pass, single-
+threaded on the BSP.
+
+### 2. Pre-EBS NVRAM write (Apple T2 quirk)
+
+On Apple T2 hardware:
+
+- `SetVariable` called via **Runtime Services** (after
+  `ExitBootServices`) does **NOT** persist across reboot, under
+  any GUID — verified empirically.
+- `SetVariable` called via **Boot Services** (before
+  `ExitBootServices`) DOES persist — the T2 firmware commits these
+  to internal flash at the EBS transition.
+
+So the "write NVRAM after memtest runs" path is fundamentally
+unavailable on this hardware. Instead we have the user transcribe
+the addresses into a pre-EBS EFI app (`brr-entry.efi`), which writes
+NVRAM while still in Boot Services.
+
+### 3. Mask application
+
+`mask-shim.efi` reads `BrrBadPages` from NVRAM, expands each address
+by `+/- 1 MiB`, aligns to 4 KiB pages, and calls
+`AllocatePages(AllocateAddress, EfiReservedMemoryType, 1, &pa)` for
+each page. Pages that were already firmware-reserved return
+`EFI_NOT_FOUND` / `EFI_ACCESS_DENIED` — that counts as "already safe",
+not as failure.
+
+Then the shim uses `LocateHandle(ByProtocol, SimpleFileSystem)` to
+enumerate every filesystem, scans each for `boot.efi` at several
+known path tiers, and `LoadImage + StartImage`s the first hit. macOS
+inherits the current UEFI memory map via `ExitBootServices`, sees
+the reserved pages, and routes around them for the lifetime of the
+kernel session.
+
+### 4. What's NOT implemented yet
+
+- **Permanent install.** Today the shim runs once per boot, from USB.
+  An `install.efi` helper to copy the shim to the internal ESP and
+  register a `BootNNNN` override (so shim runs without USB) is the
+  next milestone. `efi/mask-install/` has partial scaffolding.
+- **Chip-mode masking at scale.** Chip-level masking is wired
+  (`BrrBadChips` + `shim_cfl_decode_pa`), but the page-mode single-
+  address flow is the default and recommended. Chip mode reserves
+  16 GiB per bad chip on A1990 — useful only for chips with
+  rapidly-spreading failures.
+- **Row-mode masking.** `BrrDecoderStatus=VALIDATED` + `BrrBadRows`
+  path exists for DRAM-row granularity (~8 KiB per row) but the
+  validator is disabled by default. Experimental.
 
 ---
 
 ## Credits
 
-The EFI memory-map patching approach (`AllocatePages(AllocateAddress,
-EfiReservedMemoryType, ...)` before `ExitBootServices()`) is directly
-inspired by **0nelight**'s
+The EFI memory-map patching approach
+(`AllocatePages(AllocateAddress, EfiReservedMemoryType, ...)` before
+`ExitBootServices`) is directly inspired by **0nelight**'s
 [macOS-Disable-RAM-Areas](https://github.com/0nelight/macOS-Disable-RAM-Areas).
-That project first demonstrated that an EFI driver running
-pre-ExitBootServices reliably hides bad memory ranges from macOS
-without kernel patches.  BRR automates the full
-detect → trial → permanent → revert flow, but the underlying technique
-is theirs.  Thank you.
 
 **Derrick Schneider**'s
 [writeup on saving a MacBook Pro from bad RAM](https://derrick.blog/2025/02/28/how-i-saved-my-macbook-pro-from-bad-ram/)
-documented the end-to-end user workflow on a T2 Mac.  Useful reference
-when designing the trial-then-permanent prompt.
+provided the +/- 1 MiB mask-window heuristic and the end-to-end user
+workflow.
 
 Upstream [memtest86plus](https://github.com/memtest86plus/memtest86plus)
-— battle-tested RAM test code, GPL v2.
+— GPL v2.
 
 ---
 

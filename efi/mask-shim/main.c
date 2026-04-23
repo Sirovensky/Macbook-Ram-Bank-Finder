@@ -58,13 +58,22 @@ static const CHAR16 LEGACY_VARNAME_BADROWS[]= L"A1990BadRows";
 // Known macOS boot.efi paths.  Modern macOS (APFS Preboot) puts boot.efi
 // at \<SystemVolumeUUID>\System\Library\CoreServices\boot.efi -- the UUID
 // directory is per-system-volume so we can't hard-code it.  Older macOS
-// (HFS+) puts it at the root-level path.  The finder below tries the
-// root-level path first, then scans one level of subdirectories on each
-// SFS handle so the UUID-prefix form is also covered.
+// (HFS+) puts it at the root-level path.  Recovery volume uses a distinct
+// prefix.  The finder below tries root-level first, then scans 1–2 levels
+// of subdirectories, covering every known layout.
 static const CHAR16 MACOS_BOOT_PATH[] =
     L"\\System\\Library\\CoreServices\\boot.efi";
 static const CHAR16 MACOS_BOOT_SUFFIX[] =
     L"\\System\\Library\\CoreServices\\boot.efi";
+
+// Alternate root-level paths to try when the primary path misses.
+// Ordered by likelihood on a T2 macOS install.
+static const CHAR16 * const MACOS_ALT_PATHS[] = {
+    L"\\System\\Library\\CoreServices\\boot.efi",             // HFS+ root
+    L"\\com.apple.recovery.boot\\boot.efi",                    // Recovery
+    L"\\usr\\standalone\\i386\\boot.efi",                      // firmware staging
+    0
+};
 
 // ---------------------------------------------------------------------------
 // Forward declarations
@@ -379,9 +388,22 @@ static EFI_STATUS read_badmem(EFI_SYSTEM_TABLE *st, EFI_HANDLE image_handle,
 static EFI_STATUS mask_pages(EFI_SYSTEM_TABLE *st,
                               const badmem_range_t *ranges, unsigned count)
 {
-    unsigned ranges_ok = 0;
-    UINT64   pages_ok  = 0;
-    UINT64   pages_skip = 0;
+    // Reporting semantics:
+    //   pages_new       — pages we reserved via AllocatePages this call.
+    //   pages_pre       — pages firmware already owned (AllocateAddress failed
+    //                     with EFI_NOT_FOUND / EFI_ACCESS_DENIED).  These are
+    //                     still safely OFF-LIMITS to macOS, just not reserved
+    //                     by us.  Coverage is the UNION of both sets.
+    //   ranges_covered  — ranges where EVERY page in the +/-1 MiB window is
+    //                     either newly-reserved OR pre-reserved.  This is
+    //                     true "coverage" of the range.
+    //   ranges_gaps     — ranges with AT LEAST ONE page still returned to the
+    //                     OS as usable RAM.  These are the dangerous ones.
+    unsigned ranges_covered = 0;
+    unsigned ranges_gaps    = 0;
+    UINT64   pages_new = 0;
+    UINT64   pages_pre = 0;
+    UINT64   pages_gap = 0;
 
     for (unsigned i = 0; i < count; i++) {
         UINT64 orig_start = ranges[i].start;
@@ -394,32 +416,49 @@ static EFI_STATUS mask_pages(EFI_SYSTEM_TABLE *st,
         exp_start &= ~(MASK_PAGE_SIZE - 1);
         exp_end    = (exp_end + MASK_PAGE_SIZE - 1) & ~(MASK_PAGE_SIZE - 1);
 
-        // Reserve page-by-page so pre-reserved overlaps don't kill whole run.
-        unsigned page_ok_this = 0;
+        unsigned this_new = 0, this_pre = 0, this_gap = 0;
         for (UINT64 pa = exp_start; pa < exp_end; pa += MASK_PAGE_SIZE) {
             EFI_PHYSICAL_ADDRESS addr = (EFI_PHYSICAL_ADDRESS)pa;
             EFI_STATUS s = st->BootServices->AllocatePages(
                 AllocateAddress, EfiReservedMemoryType, 1, &addr);
             if (s == EFI_SUCCESS) {
-                pages_ok++;
-                page_ok_this++;
+                this_new++;
+            } else if (s == EFI_NOT_FOUND || s == EFI_ACCESS_DENIED) {
+                // Firmware already owns this page (reserved memory type,
+                // MMIO, or outside the RAM map).  Safe — macOS won't touch.
+                this_pre++;
             } else {
-                // Already reserved / firmware-owned / out-of-range — skip.
-                pages_skip++;
+                // Anything else (OUT_OF_RESOURCES, INVALID_PARAMETER, etc.)
+                // means we failed to mask AND firmware didn't reserve it.
+                // Page might still land in macOS's usable pool — DANGEROUS.
+                this_gap++;
             }
         }
-        if (page_ok_this > 0) ranges_ok++;
+        pages_new += this_new;
+        pages_pre += this_pre;
+        pages_gap += this_gap;
+        if (this_gap == 0) ranges_covered++;
+        else               ranges_gaps++;
     }
 
-    efi_print(st, L"[shim] masked ");
-    efi_print_dec(st, (UINTN)ranges_ok);
+    efi_print(st, L"[shim] mask coverage: ");
+    efi_print_dec(st, (UINTN)ranges_covered);
     efi_print(st, L"/");
     efi_print_dec(st, (UINTN)count);
-    efi_print(st, L" range(s), ");
-    efi_print_dec(st, (UINTN)pages_ok);
-    efi_print(st, L" pages reserved (+/-1 MiB), ");
-    efi_print_dec(st, (UINTN)pages_skip);
-    efi_print(st, L" pre-reserved\r\n");
+    efi_print(st, L" range(s) fully covered\r\n");
+    efi_print(st, L"[shim]   new reserves: ");
+    efi_print_dec(st, (UINTN)pages_new);
+    efi_print(st, L" page(s)  (each +/-1 MiB around bad addr)\r\n");
+    efi_print(st, L"[shim]   firmware pre-reserved: ");
+    efi_print_dec(st, (UINTN)pages_pre);
+    efi_print(st, L" page(s)  (already OFF-LIMITS to macOS)\r\n");
+    if (pages_gap > 0) {
+        efi_print(st, L"[shim]   WARNING: ");
+        efi_print_dec(st, (UINTN)pages_gap);
+        efi_print(st, L" page(s) in ");
+        efi_print_dec(st, (UINTN)ranges_gaps);
+        efi_print(st, L" range(s) NOT protected -- unsafe!\r\n");
+    }
     return EFI_SUCCESS;
 }
 
@@ -694,6 +733,193 @@ static int read_nvram_decoder_status_failed(EFI_SYSTEM_TABLE *st)
 // internal ESP — so we never accidentally re-load from it).
 // We also skip removable media.
 
+// EFI_FILE_INFO layout (per UEFI spec §12.5.2.2):
+//   offset  size  field
+//      0     8    Size           (total struct bytes incl. FileName)
+//      8     8    FileSize
+//     16     8    PhysicalSize
+//     24    16    CreateTime       (EFI_TIME — 16 bytes fixed)
+//     40    16    LastAccessTime
+//     56    16    ModificationTime
+//     72     8    Attribute        <-- check 0x10 for EFI_FILE_DIRECTORY
+//     80     -    FileName[]       <-- NUL-terminated CHAR16 string
+//
+// Earlier revisions of this function used `8*5 + 16*3 = 88` for Attribute
+// and `8*6 + 16*3 = 96` for FileName — a miscount that added 2 spurious u64s
+// before Attribute.  The result: attribute reads were garbage (two of the
+// EFI_TIME timestamp bytes), causing the directory check to randomly pass or
+// fail, and filename reads started 16 bytes into the filename, corrupting
+// the constructed path.  On T2 Macs with APFS Preboot, this meant
+// `find_macos_boot` never succeeded despite probing all SFS volumes.
+#define FILEINFO_ATTR_OFFS    72
+#define FILEINFO_FNAME_OFFS   80
+
+// Maximum directory entries we snapshot at one level.  Preboot usually has
+// 1–5 UUID dirs plus "System" / ".fseventsd"; 32 is generous.
+#define MAX_LEVEL_DIRS 32
+// Max CHAR16 per UUID-ish name (a UUID is 36 chars; pad for safety).
+#define MAX_DIRNAME_CHARS 64
+
+// Collect child directory names under `dir` into out_names[] (flat buffer of
+// MAX_LEVEL_DIRS * MAX_DIRNAME_CHARS CHAR16 slots).  Returns count.  Does NOT
+// call any nested Open during iteration — so it's safe to re-Open after this
+// returns, avoiding any firmware re-entrancy issues on the same file handle.
+static unsigned list_child_dirs(EFI_FILE_PROTOCOL *dir,
+                                 CHAR16 *out_names /* [MAX*MAX] */)
+{
+    if (!dir) return 0;
+    EFI_STATUS s = dir->SetPosition(dir, 0);
+    if (s != EFI_SUCCESS) return 0;
+
+    unsigned n = 0;
+    // 4 KiB buffer — comfortably handles CHAR16 filenames up to ~2000 chars
+    // even though UEFI caps at 255.  Heap-alloc via static storage is fine
+    // because mask-shim is single-threaded.
+    static UINT8 dirent_buf[4096];
+
+    for (;;) {
+        UINTN dirent_sz = sizeof(dirent_buf);
+        s = dir->Read(dir, &dirent_sz, dirent_buf);
+        if (s == EFI_BUFFER_TOO_SMALL) {
+            // Skip oversized entry — UEFI spec allows resubmission with
+            // larger buffer, but in practice 4K is enough and dropping one
+            // malformed entry beats aborting the whole scan.
+            continue;
+        }
+        if (s != EFI_SUCCESS || dirent_sz == 0) break;
+
+        UINT64 attrs = *(UINT64 *)(dirent_buf + FILEINFO_ATTR_OFFS);
+        CHAR16 *fname = (CHAR16 *)(dirent_buf + FILEINFO_FNAME_OFFS);
+
+        if (!(attrs & 0x10 /* EFI_FILE_DIRECTORY */)) continue;
+        if (fname[0] == L'.' && fname[1] == 0) continue;
+        if (fname[0] == L'.' && fname[1] == L'.' && fname[2] == 0) continue;
+
+        // Copy into slot[n].
+        CHAR16 *slot = out_names + (UINTN)n * MAX_DIRNAME_CHARS;
+        UINTN k;
+        for (k = 0; fname[k] && k + 1 < MAX_DIRNAME_CHARS; k++)
+            slot[k] = fname[k];
+        slot[k] = 0;
+        n++;
+        if (n >= MAX_LEVEL_DIRS) break;
+    }
+    return n;
+}
+
+// Join prefix + "\" + name + suffix into out[].  Returns total chars (excl NUL).
+static UINTN path_join(CHAR16 *out, UINTN cap,
+                        const CHAR16 *prefix, const CHAR16 *name,
+                        const CHAR16 *suffix)
+{
+    UINTN pos = 0;
+    if (prefix) {
+        for (UINTN i = 0; prefix[i] && pos + 1 < cap; i++)
+            out[pos++] = prefix[i];
+    }
+    if (name) {
+        if (pos + 1 < cap) out[pos++] = L'\\';
+        for (UINTN i = 0; name[i] && pos + 1 < cap; i++)
+            out[pos++] = name[i];
+    }
+    if (suffix) {
+        for (UINTN i = 0; suffix[i] && pos + 1 < cap; i++)
+            out[pos++] = suffix[i];
+    }
+    out[pos] = 0;
+    return pos;
+}
+
+static EFI_STATUS try_path(EFI_SYSTEM_TABLE *st,
+                            EFI_HANDLE device,
+                            EFI_FILE_PROTOCOL *root,
+                            const CHAR16 *path,
+                            EFI_DEVICE_PATH_PROTOCOL **out_path)
+{
+    EFI_FILE_PROTOCOL *f = NULL;
+    EFI_STATUS s = root->Open(root, &f, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
+    if (s != EFI_SUCCESS) return s;
+    f->Close(f);
+    return build_file_device_path(st, device, path, out_path);
+}
+
+// Try each candidate macOS boot.efi path under `root` on the given handle.
+// Returns EFI_SUCCESS on first hit, writing *out_path via build_file_device_path.
+//
+// Candidate paths (in priority order):
+//   1. \System\Library\CoreServices\boot.efi             (HFS+ root)
+//   2. \com.apple.recovery.boot\boot.efi                 (Recovery)
+//   3. \usr\standalone\i386\boot.efi                     (firmware staging)
+//   4. \<dir>\System\Library\CoreServices\boot.efi       (APFS Preboot, 1 level)
+//   5. \<dir>\<subdir>\System\Library\CoreServices\boot.efi  (some nested layouts)
+//
+// Scanning is two-phase to avoid re-entrant Open() calls during Read()
+// iteration — first we snapshot directory names with list_child_dirs(),
+// then we iterate the snapshot and Open each candidate path.  This avoids
+// any firmware quirk where nested Open on the same directory handle could
+// corrupt Read iteration state.
+static EFI_STATUS try_open_candidates(EFI_SYSTEM_TABLE *st,
+                                       EFI_HANDLE device,
+                                       EFI_FILE_PROTOCOL *root,
+                                       EFI_DEVICE_PATH_PROTOCOL **out_path)
+{
+    static CHAR16 full_path[512];
+    EFI_STATUS s;
+
+    // Tier 1: fixed root-level candidates.
+    for (unsigned i = 0; MACOS_ALT_PATHS[i]; i++) {
+        s = try_path(st, device, root, MACOS_ALT_PATHS[i], out_path);
+        if (s == EFI_SUCCESS) return s;
+    }
+
+    // Tier 2: snapshot 1-level dirs, then probe each.
+    static CHAR16 level1_names[MAX_LEVEL_DIRS * MAX_DIRNAME_CHARS];
+    unsigned n1 = list_child_dirs(root, level1_names);
+
+    for (unsigned i = 0; i < n1; i++) {
+        CHAR16 *name = level1_names + (UINTN)i * MAX_DIRNAME_CHARS;
+
+        path_join(full_path, sizeof(full_path) / sizeof(full_path[0]),
+                  L"\\", name, MACOS_BOOT_SUFFIX);
+        s = try_path(st, device, root, full_path, out_path);
+        if (s == EFI_SUCCESS) return s;
+
+        // Tier 3: open <name> and snapshot its children, then probe.
+        CHAR16 dir_only[128];
+        path_join(dir_only, sizeof(dir_only) / sizeof(dir_only[0]),
+                  L"\\", name, L"");
+
+        EFI_FILE_PROTOCOL *sub = NULL;
+        s = root->Open(root, &sub, dir_only, EFI_FILE_MODE_READ, 0);
+        if (s != EFI_SUCCESS) continue;
+
+        static CHAR16 level2_names[MAX_LEVEL_DIRS * MAX_DIRNAME_CHARS];
+        unsigned n2 = list_child_dirs(sub, level2_names);
+        sub->Close(sub);
+
+        for (unsigned j = 0; j < n2; j++) {
+            CHAR16 *name2 = level2_names + (UINTN)j * MAX_DIRNAME_CHARS;
+
+            UINTN pos = 0;
+            UINTN cap = sizeof(full_path) / sizeof(full_path[0]);
+            full_path[pos++] = L'\\';
+            for (UINTN k = 0; name[k] && pos + 1 < cap; k++)
+                full_path[pos++] = name[k];
+            full_path[pos++] = L'\\';
+            for (UINTN k = 0; name2[k] && pos + 1 < cap; k++)
+                full_path[pos++] = name2[k];
+            for (UINTN k = 0; MACOS_BOOT_SUFFIX[k] && pos + 1 < cap; k++)
+                full_path[pos++] = MACOS_BOOT_SUFFIX[k];
+            full_path[pos] = 0;
+
+            s = try_path(st, device, root, full_path, out_path);
+            if (s == EFI_SUCCESS) return s;
+        }
+    }
+
+    return EFI_NOT_FOUND;
+}
+
 static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
                                    EFI_HANDLE image_handle,
                                    EFI_HANDLE *out_device,
@@ -727,97 +953,97 @@ static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
 
     UINTN n_handles = buf_sz / sizeof(EFI_HANDLE);
     EFI_STATUS found = EFI_NOT_FOUND;
-    unsigned probed = 0;
+    unsigned probed = 0, skipped_self = 0, skipped_removable = 0;
 
-    for (UINTN i = 0; i < n_handles; i++) {
-        // Skip our own device (USB or ESP we were loaded from).
-        if (handles[i] == own_dev) continue;
+    // Two-pass: first pass skips our own device (preferred path — we want
+    // the internal SSD, not re-booting from USB).  Second pass ONLY runs if
+    // the first found nothing, and includes own_dev as a last-resort check
+    // (covers firmware quirks where own_dev is misreported).
+    for (int pass = 0; pass < 2 && found != EFI_SUCCESS; pass++) {
+        probed = 0;
+        skipped_self = 0;
+        skipped_removable = 0;
 
-        // Skip removable media.
-        EFI_BLOCK_IO_PROTOCOL *bio = NULL;
-        s = st->BootServices->HandleProtocol(
-            handles[i], (EFI_GUID *)&bio_guid, (void **)&bio);
-        if (s == EFI_SUCCESS && bio->Media && bio->Media->RemovableMedia)
-            continue;
+        for (UINTN i = 0; i < n_handles; i++) {
+            if (pass == 0 && handles[i] == own_dev) { skipped_self++; continue; }
 
-        EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = NULL;
-        s = st->BootServices->HandleProtocol(
-            handles[i], (EFI_GUID *)&sfs_guid, (void **)&sfs);
-        if (s != EFI_SUCCESS) continue;
+            // Skip removable media on first pass only.
+            if (pass == 0) {
+                EFI_BLOCK_IO_PROTOCOL *bio = NULL;
+                s = st->BootServices->HandleProtocol(
+                    handles[i], (EFI_GUID *)&bio_guid, (void **)&bio);
+                if (s == EFI_SUCCESS && bio->Media && bio->Media->RemovableMedia) {
+                    skipped_removable++;
+                    continue;
+                }
+            }
 
-        EFI_FILE_PROTOCOL *root = NULL;
-        s = sfs->OpenVolume(sfs, &root);
-        if (s != EFI_SUCCESS) continue;
+            EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = NULL;
+            s = st->BootServices->HandleProtocol(
+                handles[i], (EFI_GUID *)&sfs_guid, (void **)&sfs);
+            if (s != EFI_SUCCESS) continue;
 
-        probed++;
+            EFI_FILE_PROTOCOL *root = NULL;
+            s = sfs->OpenVolume(sfs, &root);
+            if (s != EFI_SUCCESS) continue;
 
-        // Tier 1: root-level \System\Library\CoreServices\boot.efi
-        // (legacy HFS+ macOS, catalina and earlier).
-        EFI_FILE_PROTOCOL *f = NULL;
-        s = root->Open(root, &f, (CHAR16 *)MACOS_BOOT_PATH,
-                       EFI_FILE_MODE_READ, 0);
-        if (s == EFI_SUCCESS) {
-            f->Close(f);
-            *out_device = handles[i];
-            found = build_file_device_path(st, handles[i],
-                                           MACOS_BOOT_PATH, out_path);
+            probed++;
+
+            // Diagnostic: on the FIRST pass, dump up to 3 root child-dir
+            // names so a user photo reveals what the volume contains.
+            // Helps debug the "NOT FOUND" case remotely.
+            if (pass == 0) {
+                static CHAR16 peek_names[3 * MAX_DIRNAME_CHARS];
+                unsigned peek_n = 0;
+                EFI_STATUS ps = root->SetPosition(root, 0);
+                if (ps == EFI_SUCCESS) {
+                    static UINT8 peek_buf[4096];
+                    while (peek_n < 3) {
+                        UINTN psz = sizeof(peek_buf);
+                        ps = root->Read(root, &psz, peek_buf);
+                        if (ps == EFI_BUFFER_TOO_SMALL) continue;
+                        if (ps != EFI_SUCCESS || psz == 0) break;
+                        UINT64 a = *(UINT64 *)(peek_buf + FILEINFO_ATTR_OFFS);
+                        CHAR16 *fn = (CHAR16 *)(peek_buf + FILEINFO_FNAME_OFFS);
+                        if (fn[0] == L'.' && fn[1] == 0) continue;
+                        if (fn[0] == L'.' && fn[1] == L'.' && fn[2] == 0) continue;
+                        (void)a;
+                        CHAR16 *slot = peek_names + (UINTN)peek_n * MAX_DIRNAME_CHARS;
+                        // Truncate to 12 chars for display.
+                        UINTN k;
+                        for (k = 0; fn[k] && k < 12; k++) slot[k] = fn[k];
+                        slot[k] = 0;
+                        peek_n++;
+                    }
+                }
+                efi_print(st, L"[shim]  vol#");
+                efi_print_dec(st, (UINTN)i);
+                efi_print(st, L": ");
+                for (unsigned pi = 0; pi < peek_n; pi++) {
+                    if (pi > 0) efi_print(st, L", ");
+                    efi_print(st, peek_names + (UINTN)pi * MAX_DIRNAME_CHARS);
+                }
+                if (peek_n == 0) efi_print(st, L"(empty)");
+                efi_print(st, L"\r\n");
+            }
+
+            found = try_open_candidates(st, handles[i], root, out_path);
             root->Close(root);
-            if (found == EFI_SUCCESS) break;
-            continue;
-        }
 
-        // Tier 2: one level deep -- iterate directory entries at root,
-        // try <entry>\System\Library\CoreServices\boot.efi for each
-        // directory.  Matches APFS Preboot layout where each system
-        // volume has a UUID-named subdirectory.
-        s = root->SetPosition(root, 0);
-        if (s != EFI_SUCCESS) { root->Close(root); continue; }
-
-        EFI_FILE_PROTOCOL *found_file = NULL;
-        static CHAR16 full_path[128];
-        for (;;) {
-            static UINT8 dirent_buf[512];
-            UINTN dirent_sz = sizeof(dirent_buf);
-            s = root->Read(root, &dirent_sz, dirent_buf);
-            if (s != EFI_SUCCESS || dirent_sz == 0) break;
-
-            // EFI_FILE_INFO: size(u64) + filesize(u64) + physsize(u64) +
-            //                createtime(16) + lastaccess(16) + modtime(16) +
-            //                attrs(u64) + filename(CHAR16[])
-            UINT64 attrs = *(UINT64 *)(dirent_buf + 8*5 + 16*3);
-            CHAR16 *fname = (CHAR16 *)(dirent_buf + 8*6 + 16*3);
-
-            // Must be a directory, not "." or ".."
-            if (!(attrs & 0x10 /* EFI_FILE_DIRECTORY */)) continue;
-            if (fname[0] == L'.' && fname[1] == 0) continue;
-            if (fname[0] == L'.' && fname[1] == L'.' && fname[2] == 0) continue;
-
-            // Build "\<dir>\System\Library\CoreServices\boot.efi"
-            UINTN pos = 0;
-            full_path[pos++] = L'\\';
-            for (UINTN k = 0; fname[k] && pos < 120; k++)
-                full_path[pos++] = fname[k];
-            for (UINTN k = 0; MACOS_BOOT_SUFFIX[k] && pos < 127; k++)
-                full_path[pos++] = MACOS_BOOT_SUFFIX[k];
-            full_path[pos] = 0;
-
-            s = root->Open(root, &found_file, full_path,
-                           EFI_FILE_MODE_READ, 0);
-            if (s == EFI_SUCCESS) {
-                found_file->Close(found_file);
+            if (found == EFI_SUCCESS) {
                 *out_device = handles[i];
-                found = build_file_device_path(st, handles[i],
-                                               full_path, out_path);
                 break;
             }
         }
-        root->Close(root);
-        if (found == EFI_SUCCESS) break;
     }
 
     efi_print(st, L"[shim] find_macos_boot: probed ");
     efi_print_dec(st, (UINTN)probed);
-    efi_print(st, L" non-removable SFS volume(s), ");
+    efi_print(st, L" volume(s) (skipped ");
+    efi_print_dec(st, (UINTN)skipped_self);
+    efi_print(st, L" self, ");
+    efi_print_dec(st, (UINTN)skipped_removable);
+    efi_print(st, L" removable), ");
     efi_print(st, (found == EFI_SUCCESS) ? L"FOUND\r\n" : L"NOT FOUND\r\n");
 
     st->BootServices->FreePool(handles);

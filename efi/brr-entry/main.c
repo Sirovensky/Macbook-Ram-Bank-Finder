@@ -391,6 +391,19 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
                     CHAR16 k = efi_readkey(st);
                     if (k == L'Y' || k == L'y') {
                         efi_newline(st);
+                        // Re-assert state=TRIAL_PENDING_PAGE.  If an older
+                        // buggy build of mask-shim (or an install.efi from a
+                        // prior run) left state at TRIAL_BOOTED / PERMANENT_*,
+                        // the shim would take its fallback branch and the
+                        // user would see confusing "state=TRIAL_BOOTED" logs.
+                        // Re-asserting here guarantees a clean page-mode trial.
+                        EFI_STATUS ss = mask_nvram_set_ascii(
+                            st, BRR_VARNAME_STATE, BRR_STATE_TRIAL_PENDING_PAGE);
+                        if (ss != EFI_SUCCESS) {
+                            efi_print(st, L"  WARNING: could not reset state (");
+                            efi_print_hex(st, (UINT64)ss);
+                            efi_print(st, L") -- chainloading anyway\r\n");
+                        }
                         efi_print(st, L"  Applying mask + booting macOS ...\r\n");
                         efi_stall_ms(st, 800);
                         EFI_STATUS cs = chainload_shim(image_handle, st);
