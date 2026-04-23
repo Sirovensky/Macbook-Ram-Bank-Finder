@@ -169,12 +169,25 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
         // Show BrrBadPages count (informational).
         {
+            static const EFI_GUID APPLE_GUID_INST = {
+                0x7c436110, 0xab2a, 0x4bbb,
+                { 0xa8, 0x80, 0xfe, 0x41, 0x99, 0x5c, 0x9f, 0x82 }
+            };
             static UINT8 probe_blob[8];
             UINTN probe_sz = sizeof(probe_blob);
             UINT32 probe_attrs = 0;
             EFI_STATUS sv = st->RuntimeServices->GetVariable(
                 (CHAR16 *)BRR_VARNAME_BADPAGES, (EFI_GUID *)&BRR_GUID,
                 &probe_attrs, &probe_sz, probe_blob);
+            if (sv != EFI_SUCCESS) {
+                // Apple-GUID fallback (T2 commits those).
+                probe_sz = sizeof(probe_blob);
+                probe_attrs = 0;
+                sv = st->RuntimeServices->GetVariable(
+                    (CHAR16 *)BRR_VARNAME_BADPAGES,
+                    (EFI_GUID *)&APPLE_GUID_INST,
+                    &probe_attrs, &probe_sz, probe_blob);
+            }
             if (sv == EFI_SUCCESS && probe_sz >= 8) {
                 UINT32 n_pages = ((UINT32)probe_blob[4]       |
                                   ((UINT32)probe_blob[5] << 8)  |

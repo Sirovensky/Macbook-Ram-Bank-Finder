@@ -108,6 +108,13 @@ void mask_nvram_delete(EFI_SYSTEM_TABLE *st, const CHAR16 *name)
         EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
             EFI_VARIABLE_RUNTIME_ACCESS,
         0, NULL);
+
+    // Also delete any Apple-GUID copy so revert leaves nothing behind.
+    st->RuntimeServices->SetVariable(
+        (CHAR16 *)name, (EFI_GUID *)&APPLE_GUID_OPS,
+        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+            EFI_VARIABLE_RUNTIME_ACCESS,
+        0, NULL);
 }
 
 static EFI_STATUS nvram_set_raw(EFI_SYSTEM_TABLE *st, const CHAR16 *name,
