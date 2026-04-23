@@ -132,6 +132,7 @@ BRR mask-shim v1
 [shim] mask coverage: 3/3 range(s) fully covered
 [shim]   new reserves: 1024 page(s)  (each +/-1 MiB around bad addr)
 [shim]   firmware pre-reserved: 512 page(s)  (already OFF-LIMITS to macOS)
+[shim] verify: 3/3 bad PA(s) confirmed EfiReservedMemoryType in memory map
 [shim]  vol#0: EFI, .fseventsd
 [shim]  vol#1: 5A1B3...
 [shim]  vol#2: com.apple.r...
@@ -155,6 +156,15 @@ That means some pages in the mask window returned an error from
 `AllocatePages` that wasn't "already reserved" (e.g. out-of-RAM
 region, invalid parameter). Rare — usually the bad address was typed
 wrong. Retry entry 3 with correct addresses.
+
+### Verify line
+
+`[shim] verify: N/M bad PA(s) confirmed EfiReservedMemoryType in memory map`
+— after mask application, shim re-reads the UEFI memory map and
+checks each bad PA landed in a descriptor marked `EfiReservedMemoryType`
+(Type==0). N == M is the success case. If N < M, a per-PA warning
+prints showing which PAs still read as a non-reserved type — treat
+this as the mask having failed silently.
 
 ### Volume peek
 
