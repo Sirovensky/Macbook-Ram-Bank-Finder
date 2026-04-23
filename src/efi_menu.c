@@ -158,8 +158,16 @@ struct brr_preboot_log {
     unsigned magic;
     char     buf[8192];
 };
+// Pre-seed with a marker so the post-EBS dump can prove the struct
+// is reachable and .data-placed even if efi_menu never wrote to it
+// (early-return paths, firmware quirks etc).  len=27 matches the
+// literal length so the dump prints exactly this line first.
 __attribute__((section(".data")))
-struct brr_preboot_log g_brr_preboot = { 0, 0xB007B007u, { ' ' } };
+struct brr_preboot_log g_brr_preboot = {
+    27,
+    0xB007B007u,
+    "[init] preboot buf alive\n\n"
+};
 
 // Write narrow ASCII content to a file at the USB ESP root.  Returns 0
 // on success, EFI status on failure (use print_string to log since
@@ -623,25 +631,47 @@ uint32_t g_brr_flags_cached = 0;
 
 static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const char *cmdline);
 
+// Direct-to-buffer log (bypasses con_puts so early returns still
+// leave a breadcrumb for the post-EBS dump).
+static void brr_buf_log(const char *s)
+{
+    while (*s && g_brr_preboot.len < sizeof(g_brr_preboot.buf) - 1) {
+        g_brr_preboot.buf[g_brr_preboot.len++] = *s++;
+    }
+    g_brr_preboot.buf[g_brr_preboot.len] = 0;
+}
+
 uint32_t efi_menu(void *sys_table_arg, void *image_handle_arg, const char *cmdline)
 {
+    brr_buf_log("[wrap] efi_menu() entered\n");
     uint32_t f = efi_menu_impl(sys_table_arg, image_handle_arg, cmdline);
+    brr_buf_log("[wrap] efi_menu_impl returned\n");
     g_brr_flags_cached = f;
     return f;
 }
 
 static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const char *cmdline)
 {
+    brr_buf_log("[impl] entered\n");
     efi_system_table_t *st = (efi_system_table_t *)sys_table_arg;
     efi_handle_t image_handle = (efi_handle_t)image_handle_arg;
-    if (!st) return 0;
+    if (!st) { brr_buf_log("[impl] st NULL, early-return\n"); return 0; }
 
     g_con_out = st->con_out;
     g_con_in  = st->con_in;
     g_bs      = st->boot_services;
     g_rs      = st->runtime_services;
+    brr_buf_log("[impl] got con_out/in/bs/rs pointers\n");
+    if (!g_con_out) brr_buf_log("[impl] WARNING g_con_out is NULL\n");
+    if (!g_con_in)  brr_buf_log("[impl] WARNING g_con_in is NULL\n");
+    if (!g_bs)      brr_buf_log("[impl] WARNING g_bs is NULL\n");
+    if (!g_rs)      brr_buf_log("[impl] WARNING g_rs is NULL\n");
 
-    if (!g_con_out || !g_con_in || !g_bs) return 0;
+    if (!g_con_out || !g_con_in || !g_bs) {
+        brr_buf_log("[impl] critical protocol NULL, early-return 0\n");
+        return 0;
+    }
+    brr_buf_log("[impl] past NULL checks, proceeding\n");
 
     // Helper macro: pause N ms via BS Stall.  Used between pre-EBS
     // diagnostic lines so the user can actually read them before the
@@ -1024,12 +1054,19 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
 // on A1990).  Called from main.c::global_init after screen_init.
 void brr_preboot_log_dump(void)
 {
-    if (g_brr_preboot.magic != 0xB007B007u) return;  // uninitialized
-    if (g_brr_preboot.len == 0) return;
-
-    display_scrolled_message(0, "=== pre-EBS diagnostic log (%u bytes) ===",
+    // Unconditional header: tells us at a glance whether the struct
+    // is reachable in .data (magic should be 0xB007B007 always) and
+    // whether efi_menu added anything on top of the init marker.
+    display_scrolled_message(0, "=== pre-EBS log: magic=%x len=%u ===",
+                              (uintptr_t)g_brr_preboot.magic,
                               (uintptr_t)g_brr_preboot.len);
     scroll();
+
+    if (g_brr_preboot.len == 0) {
+        display_scrolled_message(0, "    (empty -- efi_menu did not run or returned before any con_puts)");
+        scroll();
+        return;
+    }
 
     char line[128];
     unsigned i = 0;
