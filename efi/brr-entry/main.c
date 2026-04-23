@@ -344,24 +344,24 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (st->ConIn && st->ConIn->Reset)
         st->ConIn->Reset(st->ConIn, 0);
 
-    efi_print(st, L"==========================================================\r\n");
-    efi_print(st, L"   BRR -- step 2 of 2: enter bad addresses, apply mask\r\n");
-    efi_print(st, L"==========================================================\r\n");
     efi_print(st, L"\r\n");
-    efi_print(st, L" From the memtest screen you photographed, type the\r\n");
-    efi_print(st, L" addresses here.  Comma-separated hex.  0x prefix OK.\r\n");
+    efi_print(st, L"  ============================================\r\n");
+    efi_print(st, L"        APPLY MASK -- enter bad addresses\r\n");
+    efi_print(st, L"  ============================================\r\n");
     efi_print(st, L"\r\n");
-    efi_print(st, L"   example:  0xb2100000, 0xb2200000\r\n");
+    efi_print(st, L"  Type the bad addresses from the memtest photo.\r\n");
     efi_print(st, L"\r\n");
-    efi_print(st, L" Each address gets +/-1 MiB padding automatically.\r\n");
-    efi_print(st, L" Keys: Enter = submit,  Backspace = delete,  ESC = cancel.\r\n");
+    efi_print(st, L"  Format:  hex, comma-separated  (0x optional)\r\n");
+    efi_print(st, L"  Example: 0xb2100000, 0xb2200000\r\n");
     efi_print(st, L"\r\n");
-    efi_print(st, L" addresses> ");
+    efi_print(st, L"  Enter = submit    Backspace = delete    ESC = cancel\r\n");
+    efi_print(st, L"\r\n");
+    efi_print(st, L"  > ");
 
     static CHAR16 line[512];
     unsigned n = read_line(st, line, sizeof(line) / sizeof(line[0]));
     if (n == 0) {
-        efi_print(st, L"\r\n[brr-entry] Cancelled (empty input).\r\n");
+        efi_print(st, L"\r\n  Cancelled.\r\n");
         efi_stall_ms(st, 2000);
         return EFI_SUCCESS;
     }
@@ -369,45 +369,44 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     static UINT64 pas[256];
     unsigned npa = parse_addresses(line, pas, 256);
 
-    efi_print(st, L"\r\n");
-    efi_print(st, L"[brr-entry] Parsed ");
-    efi_print_dec(st, (UINTN)npa);
-    efi_print(st, L" address(es):\r\n");
-    for (unsigned i = 0; i < npa; i++) {
-        efi_print(st, L"  [");
-        efi_print_dec(st, (UINTN)i);
-        efi_print(st, L"]  ");
-        efi_print_hex(st, pas[i]);
-        efi_print(st, L"  -> mask ");
-        efi_print_hex(st, pas[i] - 0x100000ULL);
-        efi_print(st, L" .. ");
-        efi_print_hex(st, pas[i] + 0x100000ULL);
-        efi_print(st, L"\r\n");
-    }
-    efi_print(st, L"\r\n");
-
     if (npa == 0) {
-        efi_print(st, L"[brr-entry] No valid addresses parsed.  Cancelled.\r\n");
+        efi_print(st, L"\r\n  No valid addresses.  Cancelled.\r\n");
         efi_stall_ms(st, 3000);
         return EFI_SUCCESS;
     }
 
-    // Confirm.
-    efi_print(st, L" Press [Y] to save + reboot into macOS with mask,\r\n");
-    efi_print(st, L" any other key = cancel\r\n\r\n");
+    efi_print(st, L"\r\n");
+    efi_print(st, L"  Parsed ");
+    efi_print_dec(st, (UINTN)npa);
+    efi_print(st, L" address(es):\r\n");
+    efi_print(st, L"\r\n");
+    for (unsigned i = 0; i < npa; i++) {
+        efi_print(st, L"    ");
+        efi_print_dec(st, (UINTN)(i + 1));
+        efi_print(st, L". ");
+        efi_print_hex(st, pas[i]);
+        efi_print(st, L"  -> masking ");
+        efi_print_hex(st, pas[i] - 0x100000ULL);
+        efi_print(st, L" .. ");
+        efi_print_hex(st, pas[i] + 0x100000ULL);
+        efi_print(st, L"  (2 MiB)\r\n");
+    }
+    efi_print(st, L"\r\n");
+    efi_print(st, L"  Type Y to apply, any other key to cancel.\r\n");
+    efi_print(st, L"\r\n");
+
     for (;;) {
         CHAR16 k = efi_readkey(st);
         if (k == L'Y' || k == L'y') { efi_newline(st); break; }
         if (k != 0) {
-            efi_print(st, L"\r\n[brr-entry] Cancelled by user.\r\n");
+            efi_print(st, L"\r\n  Cancelled.\r\n");
             efi_stall_ms(st, 2000);
             return EFI_SUCCESS;
         }
         efi_stall_ms(st, 50);
     }
 
-    // Write BrrBadPages.
-    efi_print(st, L"[brr-entry] Writing BrrBadPages NVRAM variable... ");
+    efi_print(st, L"  Writing to NVRAM   ... ");
     EFI_STATUS s = write_bad_pages(st, pas, npa);
     if (s != EFI_SUCCESS) {
         efi_print(st, L"FAILED (status=");
@@ -419,23 +418,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     }
     efi_print(st, L"OK\r\n");
 
-    // Read back to verify (pre-EBS GetVariable works; T2 commits on EBS).
-    {
-        static UINT8 rb[8 + 4096 * 8];
-        UINTN rb_sz = sizeof(rb);
-        UINT32 attrs = 0;
-        s = st->RuntimeServices->GetVariable(
-            (CHAR16 *)BRR_VARNAME_BADPAGES, (EFI_GUID *)&BRR_GUID,
-            &attrs, &rb_sz, rb);
-        efi_print(st, L"[brr-entry] Readback: status=");
-        efi_print_hex(st, (UINT64)s);
-        efi_print(st, L"  bytes=");
-        efi_print_dec(st, (UINTN)rb_sz);
-        efi_print(st, L"\r\n");
-    }
-
-    // Write state.
-    efi_print(st, L"[brr-entry] Setting BrrMaskState=TRIAL_PENDING_PAGE... ");
+    efi_print(st, L"  Saving state       ... ");
     s = mask_nvram_set_ascii(st, BRR_VARNAME_STATE, BRR_STATE_TRIAL_PENDING_PAGE);
     if (s != EFI_SUCCESS) {
         efi_print(st, L"FAILED (status=");
@@ -447,23 +430,23 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     efi_print(st, L"OK\r\n");
 
     efi_print(st, L"\r\n");
-    efi_print(st, L" ==========================================================\r\n");
-    efi_print(st, L"   NVRAM hook saved.  Chainloading mask-shim.efi ...\r\n");
-    efi_print(st, L" ==========================================================\r\n");
+    efi_print(st, L"  Applying mask + booting macOS ...\r\n");
     efi_print(st, L"\r\n");
-    efi_stall_ms(st, 1500);
+    efi_stall_ms(st, 1000);
 
     s = chainload_shim(image_handle, st);
-    // Chainload should not return on success.  If it does, NVRAM state
-    // was still committed so a fresh boot (power cycle) plus USB boot
-    // will still pick up the mask via mask-shim installed on the ESP.
-    efi_print(st, L"\r\n Chainload failed (status=");
+    // If we return here, chainload failed but NVRAM state is committed.
+    // A power-cycle + USB boot will re-run this tool and pick up the
+    // already-saved state (addresses auto-applied without retyping).
+    efi_print(st, L"\r\n");
+    efi_print(st, L"  Could not chainload mask-shim (status=");
     efi_print_hex(st, (UINT64)s);
-    efi_print(st, L").  Reboot + boot USB again and mask-shim will\r\n");
-    efi_print(st, L" still apply the mask on next pass.\r\n");
-    efi_stall_ms(st, 15000);
+    efi_print(st, L").\r\n");
+    efi_print(st, L"  The mask state is already saved.  Rebooting in 10 s --\r\n");
+    efi_print(st, L"  at the grub menu pick entry 3 again to retry, or just\r\n");
+    efi_print(st, L"  power off; the next boot from USB will pick up the mask.\r\n");
+    efi_stall_ms(st, 10000);
 
-    // Warm reboot regardless of chainload outcome -- state is in NVRAM.
     st->RuntimeServices->ResetSystem(EFI_RESET_WARM, EFI_SUCCESS, 0, NULL);
     for (;;) { __asm__ __volatile__("hlt"); }
     return EFI_SUCCESS;

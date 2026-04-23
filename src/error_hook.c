@@ -84,7 +84,7 @@ static void decode_and_log_one(uint64_t addr)
     struct pa_decoded pa = imc_decode_pa(addr);
     if (!pa.valid) return;
 
-    // Record bad row for NVRAM row-mode.
+    // Record bad row for diagnostic accumulator.
     if (pa.bank_row_valid) {
         badmem_log_record_row(pa.channel, pa.rank,
                               pa.bank_group, pa.bank, pa.row);
@@ -126,6 +126,28 @@ static void decode_and_log_one(uint64_t addr)
             badmem_log_record_chip(pk->designator);
         }
     }
+
+    // Print a one-line human summary: first chip + "+N more" if many.
+    // Addresses are printed separately by badmem_log_dump; here we
+    // surface chip identity so the user sees which physical BGA(s)
+    // likely hold the bad cells.
+    extern void scroll(void);
+    if (seen_count == 1) {
+        display_scrolled_message(0, "    %x  ch%i rk%i  chip: %s",
+            (uintptr_t)addr,
+            (uintptr_t)pa.channel,
+            (uintptr_t)(pa.rank_valid ? pa.rank : 0),
+            (uintptr_t)seen[0]);
+        scroll();
+    } else if (seen_count > 1) {
+        display_scrolled_message(0, "    %x  ch%i rk%i  chip: %s (+%i more on bus)",
+            (uintptr_t)addr,
+            (uintptr_t)pa.channel,
+            (uintptr_t)(pa.rank_valid ? pa.rank : 0),
+            (uintptr_t)seen[0],
+            (uintptr_t)(seen_count - 1));
+        scroll();
+    }
 }
 
 // Called from app/main.c at end of each pass (patch 0005/0009 area),
@@ -136,60 +158,42 @@ static void decode_and_log_one(uint64_t addr)
 // both lists.
 void board_decode_pass(void)
 {
-    extern uint64_t *badmem_log_entries(unsigned *out_count);  // from badmem_log.c
+    extern uint64_t *badmem_log_entries(unsigned *out_count);
     unsigned n = 0;
     uint64_t *pas = badmem_log_entries(&n);
 
+    if (!pas || n == 0) return;
+
     display_scrolled_message(0, "");
     scroll();
-    display_scrolled_message(0, "=== End-of-pass summary ===");
+    display_scrolled_message(0, "  %u bad page(s) decoded -- chip identities:", (uintptr_t)n);
     scroll();
 
-    if (!pas || n == 0) {
-        display_scrolled_message(0, "[mem] no bad pages recorded this pass.");
-        scroll();
-        return;
-    }
-
-    display_scrolled_message(0, "[mem] decoded %u bad page(s):", n);
-    scroll();
-
-    // Print each bad PA on its own line so the user can see the full list.
     for (unsigned i = 0; i < n; i++) {
-        display_scrolled_message(0, "  PA %016x", (uintptr_t)pas[i]);
-        scroll();
         decode_and_log_one(pas[i]);
     }
 
-    display_scrolled_message(0, "[mem] see NVRAM BrrBadChips + BrrBadRows for decoded detail.");
-    scroll();
-
-    // BRR: also surface the skip list (1 MiB regions that the burst
-    // detector excluded mid-test to keep the hardware from wedging).
+    // Skip list (1 MiB regions the burst detector excluded mid-test).
     extern unsigned badmem_log_skip_count(void);
     extern const struct badmem_skip_range *badmem_log_skip_list(unsigned *);
     unsigned nskip = badmem_log_skip_count();
     if (nskip > 0) {
         const struct badmem_skip_range *skips = badmem_log_skip_list(&nskip);
-        display_scrolled_message(0, "[skip] excluded %u region(s) this pass:", nskip);
+        display_scrolled_message(0, "  %u region(s) excluded during pass:", (uintptr_t)nskip);
         scroll();
-        // Each 1 MiB skip entry is masked by the shim as a 2 MiB
-        // reservation (+/- 1 MiB expansion on next boot).
         for (unsigned i = 0; i < nskip; i++) {
             uintptr_t sz_mb = (uintptr_t)((skips[i].end - skips[i].start) >> 20);
             display_scrolled_message(0,
-                "  %u hit(s) skipped %016x - %016x (%u MiB, shim masks +/-1MiB)",
-                (uintptr_t)skips[i].hits,
+                "    %x - %x  (%u MiB, %u hit(s))",
                 (uintptr_t)skips[i].start,
                 (uintptr_t)skips[i].end,
-                sz_mb);
+                sz_mb,
+                (uintptr_t)skips[i].hits);
             scroll();
         }
     }
 
-    // Audible announcement so user hears pass completion if they're
-    // away from the laptop.  Silent no-op on hardware where the PC
-    // speaker path is filtered (T2 may block port 0x61 writes).
+    // Audible pass-end beep (silent no-op if T2 blocks port 0x61).
     extern void board_beep_pass_end(void);
     board_beep_pass_end();
 }
