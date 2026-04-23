@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// revert.efi — EFI application that performs a full A1990 mask uninstall and
-// reboots.  Loaded by grub entry 4 ("Revert all changes").
+// revert.efi — EFI application that performs a full A1990 mask uninstall
+// and reboots.  Calls uninstall_mask_full() from mask-common which:
+//   - deletes \EFI\BRR\ contents from the internal ESP
+//   - restores pre-install BootOrder (BrrBackupBootOrder -> BootOrder)
+//   - deletes BRR NVRAM variables (BrrMaskState, BrrBadPages, etc.)
 //
 // Idempotent: safe to run from any state, including NONE.
+//
+// Status (2026-04): NOT currently wired into any grub entry — the simple
+// 3-entry flow (full test / fast test / brr-entry) doesn't expose revert.
+// The binary is still staged to \EFI\BOOT\revert.efi on the USB ESP so
+// an advanced user can invoke it via the UEFI Shell if needed.  A grub
+// entry will be added when the permanent-install milestone lands.
 //
 // Copyright (C) 2024 A1990-memtest contributors.
 

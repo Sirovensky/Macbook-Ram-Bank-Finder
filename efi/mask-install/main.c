@@ -1,15 +1,23 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// mask-install — EFI application that installs or removes the mask-shim
-// on the internal ESP for persistent (PERMANENT) masking.
+// install.efi — EFI application that installs or removes the mask-shim
+// on the internal ESP for persistent (PERMANENT) masking.  Makes the
+// shim run on every boot without the USB stick plugged in.
 //
 // Usage:
-//   install.efi          — install shim + badmem.txt to internal ESP,
-//                          register BootNNNN, prepend to BootOrder, reboot.
-//   install.efi --uninstall — remove everything, restore BootOrder, reboot.
+//   install.efi              install shim + badmem.txt to internal ESP,
+//                            register BootNNNN, prepend to BootOrder, reboot.
+//   install.efi --uninstall  remove everything, restore BootOrder, reboot.
 //
-// The actual install/uninstall logic lives in efi/mask-common/mask_ops.c
-// and is shared with mask-shim and revert.efi.
+// Install/uninstall logic lives in efi/mask-common/mask_ops.c and is
+// shared with mask-shim (for the PERMANENT_UNCONFIRMED->N uninstall path)
+// and revert.efi.
+//
+// Status (2026-04): NOT wired into any grub entry — the simple 3-entry
+// flow runs mask-shim from USB on every boot.  install.efi is still
+// built and staged to \EFI\BOOT\install.efi so an advanced user can
+// invoke it via the UEFI Shell.  The grub entry will be added when
+// the permanent-install milestone lands (see TODO.md).
 
 #include "../efi_types.h"
 #include "../efi_util.h"
