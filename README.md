@@ -220,13 +220,31 @@ sudo dd if=dist/a1990-memtest.iso of=/dev/sdN bs=4M status=progress conv=fsync
 
 Or balenaEtcher / Rufus.
 
-Hosted unit test (no Docker needed):
+### Verify the flash
+
+After `dd` completes, verify the write wasn't corrupted:
+
+```sh
+# macOS
+shasum -a 256 /dev/rdiskN
+# Compare against dist/a1990-memtest.iso.sha256
+
+# Linux
+sudo sha256sum /dev/sdN | head -1
+# Compare against dist/a1990-memtest.iso.sha256
+```
+
+The `.sha256` file next to the ISO contains the expected hash.  A
+mismatch means the write was truncated or corrupted — re-flash.
+
+### Hosted unit test
 
 ```
 make test-shim
 ```
 
-Runs the badmem.txt parser against fixtures — useful when hacking
+Runs the `badmem.txt` parser against fixtures using the host C
+compiler — no Docker needed. Useful when hacking
 `efi/badmem_parse.c`.
 
 ---

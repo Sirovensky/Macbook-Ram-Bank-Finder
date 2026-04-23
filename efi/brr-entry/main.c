@@ -447,18 +447,23 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     static CHAR16 line[512];
     unsigned n = read_line(st, line, sizeof(line) / sizeof(line[0]));
     if (n == 0) {
-        efi_print(st, L"\r\n  Cancelled.\r\n");
-        efi_stall_ms(st, 2000);
-        return EFI_SUCCESS;
+        efi_print(st, L"\r\n  Cancelled -- rebooting in 3 s.\r\n");
+        efi_stall_ms(st, 3000);
+        st->RuntimeServices->ResetSystem(
+            EFI_RESET_WARM, EFI_SUCCESS, 0, NULL);
+        for (;;) { __asm__ __volatile__("hlt"); }
     }
 
     static UINT64 pas[256];
     unsigned npa = parse_addresses(line, pas, 256);
 
     if (npa == 0) {
-        efi_print(st, L"\r\n  No valid addresses.  Cancelled.\r\n");
-        efi_stall_ms(st, 3000);
-        return EFI_SUCCESS;
+        efi_print(st, L"\r\n  No valid addresses found in input.\r\n");
+        efi_print(st, L"  Expected hex like '0xb21df000'.  Rebooting in 5 s.\r\n");
+        efi_stall_ms(st, 5000);
+        st->RuntimeServices->ResetSystem(
+            EFI_RESET_WARM, EFI_SUCCESS, 0, NULL);
+        for (;;) { __asm__ __volatile__("hlt"); }
     }
 
     efi_print(st, L"\r\n");
@@ -485,9 +490,11 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
         CHAR16 k = efi_readkey(st);
         if (k == L'Y' || k == L'y') { efi_newline(st); break; }
         if (k != 0) {
-            efi_print(st, L"\r\n  Cancelled.\r\n");
-            efi_stall_ms(st, 2000);
-            return EFI_SUCCESS;
+            efi_print(st, L"\r\n  Cancelled -- rebooting in 3 s.\r\n");
+            efi_stall_ms(st, 3000);
+            st->RuntimeServices->ResetSystem(
+                EFI_RESET_WARM, EFI_SUCCESS, 0, NULL);
+            for (;;) { __asm__ __volatile__("hlt"); }
         }
         efi_stall_ms(st, 50);
     }
