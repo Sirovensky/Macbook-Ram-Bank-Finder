@@ -629,54 +629,131 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
     // (void *)1 to force .data placement; 0 means "capture attempted
     // and failed" -- distinguishable post-EBS).
     g_brr_fs_root = 0;
+
+    // Probe: iterate every handle that supports SimpleFileSystem, try
+    // writing a tiny test file, read it back in the same boot.  The
+    // handle where write+readback round-trips is the one we keep.
+    // LoadedImage->device_handle is tried FIRST (grub-loaded memtest
+    // usually gets the ESP) but if that fails we fall through to the
+    // full locate_handle enumeration.
     {
+        // locate_handle with EFI_LOCATE_BY_PROTOCOL
+        typedef efi_status_t (efiapi *locate_handle_fn)(
+            int search_type, efi_guid_t *proto, void *key,
+            uintn_t *buffer_size, efi_handle_t *buffer);
+        locate_handle_fn locate_h = (locate_handle_fn)(uintptr_t)g_bs->locate_handle;
+
+        // Get list of all SFS-supporting handles.
+        uintn_t hsz = 0;
+        efi_guid_t sfs_g = SFS_GUID;
+        if (locate_h) locate_h(2 /* ByProtocol */, &sfs_g, 0, &hsz, 0);
+
+        // Allocate handle buffer via allocate_pool.
+        efi_handle_t *handles = 0;
+        if (hsz > 0) {
+            g_bs->allocate_pool(2 /* EFI_LOADER_DATA */, hsz, (void **)&handles);
+            if (handles) locate_h(2, &sfs_g, 0, &hsz, handles);
+        }
+        unsigned nh = (unsigned)(hsz / sizeof(efi_handle_t));
+
+        // Prefer LoadedImage->device_handle order: move to front.
         efi_loaded_image_t *li = 0;
-        efi_status_t s = g_bs->handle_protocol(image_handle,
-            (efi_guid_t *)&LOADED_IMAGE_GUID, (void **)&li);
-        if (s == EFI_SUCCESS && li && li->device_handle) {
-            efi_brr_sfs_t *fs = 0;
-            s = g_bs->handle_protocol(li->device_handle,
-                (efi_guid_t *)&SFS_GUID, (void **)&fs);
-            if (s == EFI_SUCCESS && fs) {
-                efi_brr_file_t *root = 0;
-                s = fs->open_volume(fs, &root);
-                if (s == EFI_SUCCESS && root) {
-                    g_brr_fs_root = root;
-                    // Write a pre-EBS marker file proving BS file-I/O works
-                    // on this USB stick.  If this file appears after a
-                    // reboot, infrastructure is good.  Name: \brr-boot.txt
-                    static efi_char16_t marker_path[] = {
-                        '\\','b','r','r','-','b','o','o','t','.','t','x','t', 0
-                    };
-                    efi_brr_file_t *f = 0;
-                    s = root->open(root, &f, marker_path,
-                        EFI_BRR_FILE_MODE_READ | EFI_BRR_FILE_MODE_WRITE |
-                        EFI_BRR_FILE_MODE_CREATE, 0);
-                    if (s == EFI_SUCCESS && f) {
-                        static const char msg[] =
-                            "BRR pre-EBS file-write test OK\n"
-                            "If you can read this on macOS, the USB ESP is writable\n"
-                            "from memtest efi_menu.  Next step is post-EBS write.\n";
-                        f->set_position(f, 0);
-                        uintn_t wlen = sizeof(msg) - 1;
-                        f->write(f, &wlen, (void *)msg);
-                        f->flush(f);
-                        f->close(f);
-                        con_puts("  [fs] wrote \\brr-boot.txt on USB (pre-EBS)\r\n");
-                    } else {
-                        con_puts("  [fs] open \\brr-boot.txt FAILED\r\n");
-                    }
-                } else {
-                    con_puts("  [fs] open_volume FAILED\r\n");
-                }
+        efi_handle_t preferred = 0;
+        if (g_bs->handle_protocol(image_handle,
+            (efi_guid_t *)&LOADED_IMAGE_GUID, (void **)&li) == EFI_SUCCESS && li) {
+            preferred = li->device_handle;
+        }
+
+        con_puts("  [fs] SFS-handle scan: ");
+        con_put_dec(nh);
+        con_puts(" candidates\r\n");
+
+        for (unsigned order = 0; order < nh + 1; order++) {
+            efi_handle_t h;
+            if (order == 0) {
+                if (!preferred) continue;
+                h = preferred;
+                con_puts("  [fs]  try (preferred/LoadedImage) ");
             } else {
-                con_puts("  [fs] SFS protocol not on device_handle\r\n");
+                if (!handles) break;
+                h = handles[order - 1];
+                if (h == preferred) continue;  // already tried
+                con_puts("  [fs]  try handle#");
+                con_put_dec(order - 1);
+                con_puts(" ");
             }
-        } else {
-            con_puts("  [fs] loaded-image device_handle NULL\r\n");
+
+            efi_brr_sfs_t *fs = 0;
+            efi_status_t s = g_bs->handle_protocol(h,
+                (efi_guid_t *)&SFS_GUID, (void **)&fs);
+            if (s != EFI_SUCCESS || !fs) { con_puts("no SFS\r\n"); continue; }
+
+            efi_brr_file_t *root = 0;
+            s = fs->open_volume(fs, &root);
+            if (s != EFI_SUCCESS || !root) { con_puts("open_volume fail\r\n"); continue; }
+
+            // Write test marker to \EFI\BOOT\brr-boot.txt (known-writable
+            // subdirectory since grub itself lives there, unlike the
+            // FAT root which may have entry-count limits on a small ESP).
+            static efi_char16_t tpath[] = {
+                '\\','E','F','I','\\','B','O','O','T','\\','b','r','r','-','b','o','o','t','.','t','x','t', 0
+            };
+            efi_brr_file_t *f = 0;
+            s = root->open(root, &f, tpath,
+                EFI_BRR_FILE_MODE_READ | EFI_BRR_FILE_MODE_WRITE |
+                EFI_BRR_FILE_MODE_CREATE, 0);
+            if (s != EFI_SUCCESS || !f) {
+                root->close(root);
+                con_puts("open FAIL\r\n");
+                continue;
+            }
+            static const char msg[] = "BRR-OK\n";
+            f->set_position(f, 0);
+            uintn_t wlen = sizeof(msg) - 1;
+            s = f->write(f, &wlen, (void *)msg);
+            f->flush(f);
+            f->close(f);
+            if (s != EFI_SUCCESS) {
+                root->close(root);
+                con_puts("write FAIL\r\n");
+                continue;
+            }
+
+            // Immediate readback in the same boot to verify SFS layer
+            // actually stored the bytes (not a silent-success on a
+            // read-only volume).
+            efi_brr_file_t *f2 = 0;
+            s = root->open(root, &f2, tpath, EFI_BRR_FILE_MODE_READ, 0);
+            if (s != EFI_SUCCESS || !f2) {
+                root->close(root);
+                con_puts("readback open FAIL\r\n");
+                continue;
+            }
+            char rb[16] = {0};
+            uintn_t rlen = sizeof(rb) - 1;
+            s = f2->read(f2, &rlen, rb);
+            f2->close(f2);
+            if (s != EFI_SUCCESS || rlen < 6 ||
+                rb[0] != 'B' || rb[1] != 'R' || rb[2] != 'R' ||
+                rb[3] != '-' || rb[4] != 'O' || rb[5] != 'K') {
+                root->close(root);
+                con_puts("readback mismatch\r\n");
+                continue;
+            }
+
+            // Round-trip passed.  Keep this root for post-EBS use.
+            g_brr_fs_root = root;
+            con_puts("ROUND-TRIP OK  <== using this handle\r\n");
+            break;
+        }
+
+        if (handles) g_bs->free_pool(handles);
+
+        if (!BRR_FS_ROOT_VALID(g_brr_fs_root)) {
+            con_puts("  [fs] NO HANDLE round-tripped -- file persistence broken\r\n");
         }
     }
-    BRR_PAUSE_MS(1500);
+    BRR_PAUSE_MS(2000);
 
     // ---------------------------------------------------------------------------
     // Grub unattended mode: `brr_auto_page` or `brr_auto_chip` in the
@@ -730,10 +807,10 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
         // the post-EBS file-write path works on this T2 and we can
         // drop NVRAM entirely.
         if (BRR_FS_ROOT_VALID(g_brr_fs_root)) {
-            static const efi_char16_t files[][20] = {
-                { '\\','b','r','r','-','b','o','o','t','.','t','x','t', 0 },
-                { '\\','b','r','r','-','s','t','a','t','e','.','t','x','t', 0 },
-                { '\\','b','r','r','-','p','a','g','e','s','.','t','x','t', 0 },
+            static const efi_char16_t files[][32] = {
+                { '\\','E','F','I','\\','B','O','O','T','\\','b','r','r','-','b','o','o','t','.','t','x','t', 0 },
+                { '\\','E','F','I','\\','B','O','O','T','\\','b','r','r','-','s','t','a','t','e','.','t','x','t', 0 },
+                { '\\','E','F','I','\\','B','O','O','T','\\','b','r','r','-','p','a','g','e','s','.','t','x','t', 0 },
             };
             static const char *labels[] = { "brr-boot", "brr-state", "brr-pages" };
             for (int idx = 0; idx < 3; idx++) {
