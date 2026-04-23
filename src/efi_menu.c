@@ -707,6 +707,63 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
         }
         con_puts("\r\n");
 
+        // Also probe the USB ESP files written by the prior boot.
+        // Reads happen pre-EBS via the same SimpleFileSystem root we
+        // just opened.  If \brr-state.txt shows TRIAL_PENDING_PAGE,
+        // the post-EBS file-write path works on this T2 and we can
+        // drop NVRAM entirely.
+        if (g_brr_fs_root) {
+            static const efi_char16_t files[][20] = {
+                { '\\','b','r','r','-','b','o','o','t','.','t','x','t', 0 },
+                { '\\','b','r','r','-','s','t','a','t','e','.','t','x','t', 0 },
+                { '\\','b','r','r','-','p','a','g','e','s','.','t','x','t', 0 },
+            };
+            static const char *labels[] = { "brr-boot", "brr-state", "brr-pages" };
+            for (int idx = 0; idx < 3; idx++) {
+                efi_brr_file_t *f = 0;
+                efi_status_t s = g_brr_fs_root->open(g_brr_fs_root, &f,
+                    (efi_char16_t *)files[idx], EFI_BRR_FILE_MODE_READ, 0);
+                con_puts("  [file] ");
+                con_puts(labels[idx]);
+                con_puts(".txt ");
+                if (s != EFI_SUCCESS || !f) {
+                    con_puts("NOT FOUND (status 0x");
+                    con_put_dec((unsigned)(s & 0xFFFFFFFFu));
+                    con_puts(")\r\n");
+                    continue;
+                }
+                static char rbuf[128];
+                uintn_t rlen = sizeof(rbuf) - 1;
+                s = f->read(f, &rlen, rbuf);
+                f->close(f);
+                if (s != EFI_SUCCESS) {
+                    con_puts("READ FAILED (status 0x");
+                    con_put_dec((unsigned)(s & 0xFFFFFFFFu));
+                    con_puts(")\r\n");
+                    continue;
+                }
+                rbuf[rlen < sizeof(rbuf) ? rlen : sizeof(rbuf) - 1] = 0;
+                con_puts("bytes=");
+                con_put_dec((unsigned)rlen);
+                con_puts(" first40=\"");
+                for (unsigned i = 0; i < rlen && i < 40; i++) {
+                    unsigned char ch = (unsigned char)rbuf[i];
+                    char buf[2] = { (ch >= 0x20 && ch < 0x7f) ? (char)ch :
+                                     (ch == '\n' ? '|' : '.'), 0 };
+                    con_puts(buf);
+                }
+                con_puts("\"\r\n");
+            }
+        } else {
+            con_puts("  [file] SFS root unavailable, cannot probe files\r\n");
+        }
+
+        // Pause briefly so user can see probe output before screen clear.
+        if (g_bs && g_bs->stall) {
+            efi_stall_fn do_stall = (efi_stall_fn)(uintptr_t)g_bs->stall;
+            do_stall(5000000);  // 5 s
+        }
+
         if (probe_sz == 0) {
             // No existing state — this is a fresh NONE boot; run the
             // decoder self-test once so page-mode can later upgrade to
