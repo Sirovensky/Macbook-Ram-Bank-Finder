@@ -1479,34 +1479,133 @@ static EFI_STATUS try_bootorder_chainload(EFI_SYSTEM_TABLE *st, EFI_HANDLE self)
         efi_print(st, desc);
         efi_print(st, L"\r\n");
 
-        // BootPolicy=TRUE: tells firmware this is a boot-manager-style
-        // load.  On Apple T2, driver-load semantics (BootPolicy=FALSE)
-        // triggers a Secure Boot authentication path that rejects the
-        // unsigned calling image chain — result is EFI_ACCESS_DENIED +
-        // the prohibition-sign screen.  Boot-manager path is what the
-        // firmware itself uses when running Boot#### entries, and it
-        // accepts our chain under "No Security".
-        EFI_HANDLE new_image = NULL;
-        EFI_STATUS ls = st->BootServices->LoadImage(
-            1 /* BootPolicy=TRUE */, self, (EFI_DEVICE_PATH_PROTOCOL *)dp,
-            NULL, 0, &new_image);
-        if (ls != EFI_SUCCESS) {
-            efi_print(st, L"[shim]     LoadImage failed: ");
-            efi_print_hex(st, (UINT64)ls);
-            efi_print(st, L"\r\n");
+        // Extract the MediaFilePath component from the Boot#### device
+        // path — we only care about the filename on the target volume,
+        // not the partition prefix.  Device-path-based LoadImage hits
+        // EFI_ACCESS_DENIED from Apple T2 regardless of BootPolicy.
+        // Instead: iterate every SFS handle, try to open this filename,
+        // read contents into buffer, LoadImage(SourceBuffer) bypasses
+        // the device-path signed-chain policy (No Security allows it).
+        static CHAR16 fp[256];
+        {
+            UINTN pos = 0;
+            fp[0] = 0;
+            const UINT8 *dpp = dp;
+            const UINT8 *dpe = dp + fpl_len;
+            while (dpp < dpe) {
+                UINT8 t = dpp[0];
+                UINT8 sub = dpp[1];
+                UINT16 nlen = (UINT16)dpp[2] | ((UINT16)dpp[3] << 8);
+                if (nlen < 4) break;
+                if (t == 0x7f && sub == 0xff) break;
+                if (t == 4 && sub == 4) {
+                    const CHAR16 *src = (const CHAR16 *)(dpp + 4);
+                    UINTN chars = (nlen - 4) / 2;
+                    for (UINTN k = 0; k < chars && src[k] != 0 && pos + 1 < 256; k++)
+                        fp[pos++] = src[k];
+                }
+                dpp += nlen;
+            }
+            fp[pos] = 0;
+        }
+
+        if (!fp[0]) {
+            efi_print(st, L"[shim]     no file path in Boot entry\r\n");
             continue;
         }
+
+        efi_print(st, L"[shim]     file path: ");
+        efi_print(st, fp);
+        efi_print(st, L"\r\n");
+
+        // Iterate SFS handles, look for one where this file opens.
+        static const EFI_GUID sfs_g = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+        static const EFI_GUID fi_g  = EFI_FILE_INFO_GUID;
+        EFI_HANDLE *hs = NULL;
+        UINTN hs_sz = 0;
+        EFI_STATUS ls = st->BootServices->LocateHandle(
+            EFI_LOCATE_BY_PROTOCOL, (EFI_GUID *)&sfs_g, NULL, &hs_sz, NULL);
+        if (ls != EFI_BUFFER_TOO_SMALL && ls != EFI_SUCCESS) continue;
+        ls = st->BootServices->AllocatePool(EfiLoaderData, hs_sz, (void **)&hs);
+        if (ls != EFI_SUCCESS) continue;
+        ls = st->BootServices->LocateHandle(
+            EFI_LOCATE_BY_PROTOCOL, (EFI_GUID *)&sfs_g, NULL, &hs_sz, hs);
+        if (ls != EFI_SUCCESS) {
+            st->BootServices->FreePool(hs);
+            continue;
+        }
+
+        UINTN n_hs = hs_sz / sizeof(EFI_HANDLE);
+        EFI_STATUS load_s = EFI_NOT_FOUND;
+        EFI_HANDLE new_image = NULL;
+
+        for (UINTN hi = 0; hi < n_hs && load_s != EFI_SUCCESS; hi++) {
+            EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = NULL;
+            if (st->BootServices->HandleProtocol(
+                    hs[hi], (EFI_GUID *)&sfs_g, (void **)&sfs) != EFI_SUCCESS) continue;
+
+            EFI_FILE_PROTOCOL *root = NULL;
+            if (sfs->OpenVolume(sfs, &root) != EFI_SUCCESS) continue;
+
+            EFI_FILE_PROTOCOL *f = NULL;
+            EFI_STATUS os = root->Open(root, &f, fp, EFI_FILE_MODE_READ, 0);
+            if (os != EFI_SUCCESS) { root->Close(root); continue; }
+
+            // File opens here.  Query size, read, LoadImage buffer.
+            static UINT8 info_b[512];
+            UINTN info_sz = sizeof(info_b);
+            os = f->GetInfo(f, (EFI_GUID *)&fi_g, &info_sz, info_b);
+            if (os != EFI_SUCCESS) { f->Close(f); root->Close(root); continue; }
+            UINT64 fs = *(UINT64 *)(info_b + 8);
+            if (fs == 0 || fs > 32ULL * 1024 * 1024) {
+                f->Close(f); root->Close(root); continue;
+            }
+
+            void *fbuf = NULL;
+            os = st->BootServices->AllocatePool(EfiLoaderData, (UINTN)fs, &fbuf);
+            if (os != EFI_SUCCESS) { f->Close(f); root->Close(root); continue; }
+
+            UINTN rd = (UINTN)fs;
+            os = f->Read(f, &rd, fbuf);
+            f->Close(f);
+            root->Close(root);
+            if (os != EFI_SUCCESS || rd != (UINTN)fs) {
+                st->BootServices->FreePool(fbuf);
+                continue;
+            }
+
+            load_s = st->BootServices->LoadImage(
+                0 /* BootPolicy; ignored when SourceBuffer is set */,
+                self, NULL, fbuf, (UINTN)fs, &new_image);
+            st->BootServices->FreePool(fbuf);
+
+            if (load_s == EFI_SUCCESS) {
+                efi_print(st, L"[shim]     SourceBuffer LoadImage OK from vol#");
+                efi_print_dec(st, (UINTN)hi);
+                efi_print(st, L"\r\n");
+                break;
+            } else {
+                efi_print(st, L"[shim]     LoadImage vol#");
+                efi_print_dec(st, (UINTN)hi);
+                efi_print(st, L" status=");
+                efi_print_hex(st, (UINT64)load_s);
+                efi_print(st, L"\r\n");
+            }
+        }
+
+        st->BootServices->FreePool(hs);
+
+        if (load_s != EFI_SUCCESS) continue;
 
         efi_print(st, L"[shim]     chainloading...\r\n");
         UINTN exit_sz = 0;
         CHAR16 *exit_data = NULL;
-        ls = st->BootServices->StartImage(new_image, &exit_sz, &exit_data);
+        EFI_STATUS ss = st->BootServices->StartImage(new_image, &exit_sz,
+                                                      &exit_data);
         efi_print(st, L"[shim]     returned: ");
-        efi_print_hex(st, (UINT64)ls);
+        efi_print_hex(st, (UINT64)ss);
         efi_print(st, L"\r\n");
-        // If StartImage returned, macOS panicked or user selected
-        // something; no point trying other entries.
-        return ls;
+        return ss;
     }
 
     return EFI_NOT_FOUND;
