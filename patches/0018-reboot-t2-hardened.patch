@@ -1,6 +1,6 @@
 --- a/system/x86/hwctrl.c
 +++ b/system/x86/hwctrl.c
-@@ -60,29 +60,66 @@ void hwctrl_init(void)
+@@ -60,29 +60,70 @@ void hwctrl_init(void)
  #endif
  }
  
@@ -26,6 +26,15 @@
 +        typedef void (efiapi *reset_fn_t)(int, int, uintn_t, void *);
 +        reset_fn_t do_reset = (reset_fn_t)(uintptr_t)efi_rs_table->reset_system;
 +
++        /* SHUTDOWN first.  T2 commits NVRAM on graceful power-off;
++         * WARM/COLD reset does NOT trigger flash commit.  User must
++         * press power to turn on after — acceptable trade-off for
++         * reliable NVRAM persistence. */
++        display_scrolled_message(0, "[reboot] ResetSystem(SHUTDOWN) - commits NVRAM");
++        scroll();
++        do_reset(2, 0, 0, (void *)0);
++        usleep(1000000);
++
 +        display_scrolled_message(0, "[reboot] ResetSystem(WARM)");
 +        scroll();
 +        do_reset(1, 0, 0, (void *)0);
@@ -34,11 +43,6 @@
 +        display_scrolled_message(0, "[reboot] ResetSystem(COLD)");
 +        scroll();
 +        do_reset(0, 0, 0, (void *)0);
-+        usleep(500000);
-+
-+        display_scrolled_message(0, "[reboot] ResetSystem(SHUTDOWN)");
-+        scroll();
-+        do_reset(2, 0, 0, (void *)0);
 +        usleep(500000);
 +    }
 +

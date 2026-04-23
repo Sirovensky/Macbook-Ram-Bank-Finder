@@ -1,6 +1,6 @@
 --- a/app/main.c
 +++ b/app/main.c
-@@ -733,6 +733,59 @@ void main(void)
+@@ -733,6 +733,62 @@ void main(void)
              extern void badmem_log_dump(void);
              if (pass_num > 0)
                  badmem_log_dump();
@@ -16,18 +16,21 @@
 +            if (pass_num > 0)
 +                badmem_log_flush_rows_nvram();
 +            {
-+                boot_params_t *bp = (boot_params_t *)boot_params_addr;
++                extern uint32_t g_brr_flags_cached;  /* stable BSS cache */
 +                extern unsigned badmem_log_count(void);
 +                extern void scroll(void);
 +                extern void check_input(void);
 +                extern void reboot(void);
 +
-+                bool auto_reboot = (bp->brr_flags & (1u << 2)) != 0;
++                /* Read cached value, NOT bp->brr_flags (boot_params region
++                 * gets clobbered by memory tests). */
++                uint32_t flags = g_brr_flags_cached;
++                bool auto_reboot = (flags & (1u << 2)) != 0;
 +                bool had_errors  = (pass_num > 0) && (badmem_log_count() > 0);
 +
 +                display_scrolled_message(0,
 +                    "[auto] brr_flags=%x auto_reboot=%u had_errors=%u",
-+                    (uintptr_t)bp->brr_flags,
++                    (uintptr_t)flags,
 +                    (uintptr_t)(auto_reboot ? 1 : 0),
 +                    (uintptr_t)(had_errors ? 1 : 0));
 +                scroll();
@@ -36,7 +39,7 @@
 +                    display_scrolled_message(0, "[auto] pass complete. Auto-reboot in 30s. ESC to reboot now.");
 +                    scroll();
 +                    for (int s = 30; s > 0; s--) {
-+                        display_scrolled_message(0, "[auto] rebooting in %2d s ...", s);
++                        display_scrolled_message(0, "[auto] rebooting in %2i s ...", s);
 +                        for (int k = 0; k < 10; k++) {
 +                            usleep(100000);
 +                            check_input();
@@ -45,14 +48,14 @@
 +                    reboot();
 +                    display_scrolled_message(0, "*** REBOOT FAILED ***");
 +                    scroll();
-+                    display_scrolled_message(0, "NVRAM state IS written. Hold power 10 s, boot USB again for shim.");
++                    display_scrolled_message(0, "NVRAM state IS written. Press power, boot USB, shim applies mask.");
 +                    scroll();
 +                    while (1) { __asm__ __volatile__("cli; hlt"); }
 +                }
 +                if (had_errors) {
 +                    display_scrolled_message(0, "[auto] pass done with errors -- halting.");
 +                    scroll();
-+                    display_scrolled_message(0, "NVRAM state written. Hold power 10 s, boot USB again for shim.");
++                    display_scrolled_message(0, "NVRAM state written. Press power, boot USB for shim chain.");
 +                    scroll();
 +                    while (1) { __asm__ __volatile__("cli; hlt"); }
 +                }

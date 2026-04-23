@@ -498,7 +498,29 @@ static int cmdline_has(const char *hay, const char *needle)
     return 0;
 }
 
+// BRR: global flag cache in memtest-BSS.
+//
+// boot_params->brr_flags is unreliable at pass-end: map_region merely
+// maps the physical region for access, it does NOT remove it from
+// pm_map, so memory tests happily write garbage over the struct.
+// Observed value at pass end on A1990: 0x3b80b56d instead of the
+// expected 0x15 (bits 0,2,4).
+//
+// Cache the value in memtest's own BSS (this file's translation
+// unit, safely inside _start.._end which memtest always excludes
+// from its test range).  Pass-end reads this, not bp->brr_flags.
+uint32_t g_brr_flags_cached = 0;
+
+static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const char *cmdline);
+
 uint32_t efi_menu(void *sys_table_arg, void *image_handle_arg, const char *cmdline)
+{
+    uint32_t f = efi_menu_impl(sys_table_arg, image_handle_arg, cmdline);
+    g_brr_flags_cached = f;
+    return f;
+}
+
+static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const char *cmdline)
 {
     efi_system_table_t *st = (efi_system_table_t *)sys_table_arg;
     efi_handle_t image_handle = (efi_handle_t)image_handle_arg;
