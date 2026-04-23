@@ -84,9 +84,12 @@ Living list. PRs welcome. Tick when landed; move to CHANGELOG if kept.
   support for USB block devices (currently read-only).
 
 - [x] **External keyboard fallback** — confirmed dead on T2 (both internal
-  and USB-C external fail in memtest's xHCI stack). Replaced with
-  ConIn-based pre-ExitBootServices menu (`src/efi_menu.c`). See
-  `docs/KEYBOARD_T2.md`.
+  and USB-C external fail in memtest's xHCI stack).  The bad-address list
+  is now photographed off the screen and transcribed manually via
+  `brr-entry.efi` (which uses UEFI ConIn pre-ExitBootServices).
+  `src/efi_menu.c` no longer shows an interactive menu — it is a thin
+  cmdline parser that returns SKIP_COUNTDOWNS for `brr_fast`.  See
+  `docs/_internal/KEYBOARD_T2.md`.
 
 - [x] **Chip-level mask policy** — per-chip masking implemented.
   `# chip: UXXXX` directives in `badmem.txt` cause the shim to walk
@@ -99,9 +102,10 @@ Living list. PRs welcome. Tick when landed; move to CHANGELOG if kept.
   Parse `.bdv`/`.fz` format (stored locally only, gitignored), render
   ASCII heatmap on calibration screen.
 
-- [ ] **README + build guide** — document Docker-on-macOS build path,
-  flash instructions (Etcher/Rufus/dd), and contributor flow for adding
-  new boards.
+- [x] **README + build guide** — full flow, flash instructions, and
+  mask-shim transcript interpretation documented in `README.md`
+  (2026-04).  Contributor flow for adding new boards is in the
+  "Contributing a new board" section.
 
 ## P3 — more boards
 
