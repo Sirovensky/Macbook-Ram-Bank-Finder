@@ -36,7 +36,7 @@
 
 // ---------------------------------------------------------------------------
 // Local ConOut pointer. Set at the top of decoder_selftest_run() from the
-// passed sys_table. We don't extern the efi_menu.c static — keep modules
+// passed sys_table. We don't reach into other modules' statics — keep
 // independent so either can be compiled/linked alone.
 // ---------------------------------------------------------------------------
 static efi_simple_text_out_t *g_con_out;
@@ -76,14 +76,17 @@ static void st_put_dec(unsigned int v)
 typedef efi_status_t (efiapi *efi_stall_fn)(uintn_t microseconds);
 
 // ---------------------------------------------------------------------------
-// SetVariable function-pointer type (same as efi_menu.c).
+// SetVariable function-pointer type.  efi_runtime_services_t in
+// memtest86plus/boot/efi.h stores set_variable as a plain `unsigned long`;
+// we cast here to avoid upstream header changes.
 // ---------------------------------------------------------------------------
 typedef efi_status_t (efiapi *set_variable_fn)(
     efi_char16_t *name, efi_guid_t *guid,
     uint32_t attrs, uintn_t data_size, void *data);
 
 // ---------------------------------------------------------------------------
-// BRR vendor GUID — same as efi_menu.c / badmem_log.c.
+// BRR vendor GUID — also defined identically in efi/mask-common/mask_ops.c
+// (shared with mask-shim / mask-install / brr-entry / revert).
 // {3E3E9DB2-1A2B-4B5C-9D1E-5F6A7B8C9D0E}
 // ---------------------------------------------------------------------------
 static const efi_guid_t BRR_GUID_ST = {
