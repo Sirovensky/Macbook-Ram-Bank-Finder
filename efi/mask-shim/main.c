@@ -1583,8 +1583,23 @@ page_mode:
     s = try_bootorder_chainload(st, image);
     if (s == EFI_SUCCESS) return s;
 
-    efi_print(st, L"[shim] ERROR: macOS boot.efi not found\r\n");
-    efi_print(st, L"  Is internal SSD present? Is T2 security set correctly?\r\n");
-    efi_stall_ms(st, 10000);
+    efi_print(st, L"\r\n");
+    efi_print(st, L"  =======================================================\r\n");
+    efi_print(st, L"   ERROR: could not locate + chainload macOS boot.efi.\r\n");
+    efi_print(st, L"  =======================================================\r\n");
+    efi_print(st, L"\r\n");
+    efi_print(st, L"  NVRAM is still saved.  You can:\r\n");
+    efi_print(st, L"\r\n");
+    efi_print(st, L"    1. Hard-reboot and retry grub entry 3 (quick-retry Y).\r\n");
+    efi_print(st, L"    2. Unplug USB, power on -- macOS boots UNMASKED (bad\r\n");
+    efi_print(st, L"       pages not protected this boot; may kernel-panic).\r\n");
+    efi_print(st, L"    3. Hold Option at next power-on to reach firmware boot\r\n");
+    efi_print(st, L"       picker, pick macOS manually (also UNMASKED).\r\n");
+    efi_print(st, L"\r\n");
+    efi_print(st, L"  Diagnostics above show which SFS volumes were probed and\r\n");
+    efi_print(st, L"  which Boot#### entries were tried.  If none matched,\r\n");
+    efi_print(st, L"  photograph this screen and file an issue.\r\n");
+    efi_print(st, L"\r\n");
+    efi_stall_ms(st, 15000);
     return EFI_NOT_FOUND;
 }
