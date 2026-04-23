@@ -292,21 +292,71 @@ void badmem_log_dump(void)
 {
     display_scrolled_message(0, "");
     scroll();
-    display_scrolled_message(0, "--- badmem.txt contents (paste into /EFI/BOOT/badmem.txt) ---");
+    display_scrolled_message(0, "=====================================================");
+    scroll();
+    display_scrolled_message(0, "  BRR bad-address summary  (%u page(s) this pass)", log_count);
+    scroll();
+    display_scrolled_message(0, "=====================================================");
     scroll();
 
     if (log_count == 0) {
-        display_scrolled_message(0, "# (no bad pages detected this run)");
+        display_scrolled_message(0, "  (no bad pages detected)");
         scroll();
     } else {
+        // Format for grub entry 8 address-entry tool (comma-separated hex).
+        display_scrolled_message(0, "  Type these into grub entry 8 (copy-paste):");
+        scroll();
+        display_scrolled_message(0, "");
+        scroll();
+        // Print up to 4 addresses per line, comma-separated.
+        char line[128];
+        unsigned line_len = 0;
+        line[0] = 0;
         for (unsigned i = 0; i < log_count; i++) {
-            // Format: 0xADDR,4096
-            display_scrolled_message(0, "0x%x,4096", (uintptr_t)log_pages[i]);
+            char abuf[24];
+            // Render "0x%x" manually since memtest printf uses its own
+            // format string and we want tight packing on one line.
+            unsigned pos = 0;
+            abuf[pos++] = '0'; abuf[pos++] = 'x';
+            uint64_t v = log_pages[i];
+            int started = 0;
+            for (int shift = 60; shift >= 0; shift -= 4) {
+                unsigned nib = (unsigned)((v >> shift) & 0xFu);
+                if (!started && nib == 0 && shift > 0) continue;
+                started = 1;
+                abuf[pos++] = nib < 10 ? ('0' + nib) : ('a' + nib - 10);
+            }
+            if (!started) abuf[pos++] = '0';
+            abuf[pos] = 0;
+
+            unsigned alen = pos;
+            unsigned comma = (i + 1 < log_count) ? 2u : 0u;  // ", " tail
+            if (line_len + alen + comma > 60) {
+                // Emit and reset.
+                display_scrolled_message(0, "    %s", (uintptr_t)line);
+                scroll();
+                line_len = 0;
+                line[0] = 0;
+            }
+            for (unsigned k = 0; k < alen; k++) line[line_len++] = abuf[k];
+            if (i + 1 < log_count) { line[line_len++] = ','; line[line_len++] = ' '; }
+            line[line_len] = 0;
+        }
+        if (line_len > 0) {
+            display_scrolled_message(0, "    %s", (uintptr_t)line);
             scroll();
         }
     }
 
-    display_scrolled_message(0, "--- end badmem.txt ---  (%u page(s) recorded)", log_count);
+    display_scrolled_message(0, "=====================================================");
+    scroll();
+    display_scrolled_message(0, "  Next: power off, boot USB, pick grub entry 8");
+    scroll();
+    display_scrolled_message(0, "  and type the addresses above.  +/-1MiB padding");
+    scroll();
+    display_scrolled_message(0, "  applied automatically by mask-shim.");
+    scroll();
+    display_scrolled_message(0, "=====================================================");
     scroll();
 }
 

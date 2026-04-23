@@ -41,17 +41,19 @@ esp_img="$bld/grub-esp.img"
 shim_efi="$here/efi/mask-shim/mask-shim.efi"
 install_efi="$here/efi/mask-install/install.efi"
 revert_efi="$here/efi/revert/revert.efi"
+entry_efi="$here/efi/brr-entry/brr-entry.efi"
 
 missing=0
-for f in "$shim_efi" "$install_efi" "$revert_efi"; do
+for f in "$shim_efi" "$install_efi" "$revert_efi" "$entry_efi"; do
     [[ -f "$f" ]] || { echo "warning: missing EFI binary: $f" >&2; missing=1; }
 done
 
 if [[ $missing -eq 0 ]]; then
-    echo "==> injecting mask-shim.efi, install.efi, revert.efi into ESP"
+    echo "==> injecting mask-shim.efi, install.efi, revert.efi, brr-entry.efi into ESP"
     mcopy -i "$esp_img" "$shim_efi"    ::/EFI/BOOT/mask-shim.efi
     mcopy -i "$esp_img" "$install_efi" ::/EFI/BOOT/install.efi
     mcopy -i "$esp_img" "$revert_efi"  ::/EFI/BOOT/revert.efi
+    mcopy -i "$esp_img" "$entry_efi"   ::/EFI/BOOT/brr-entry.efi
 else
     echo "warning: one or more EFI binaries missing; ISO will be incomplete" >&2
 fi

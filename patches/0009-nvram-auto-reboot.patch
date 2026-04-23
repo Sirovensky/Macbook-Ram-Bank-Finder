@@ -1,6 +1,6 @@
 --- a/app/main.c
 +++ b/app/main.c
-@@ -733,6 +733,63 @@ void main(void)
+@@ -733,6 +733,49 @@ void main(void)
              extern void badmem_log_dump(void);
              if (pass_num > 0)
                  badmem_log_dump();
@@ -16,47 +16,34 @@
 +            if (pass_num > 0)
 +                badmem_log_flush_rows_nvram();
 +            {
-+                /* BRR: unconditional auto-reboot on errors (formerly gated on
-+                 * BRR_FLAG_AUTO_REBOOT_AFTER_PASS bit, which kept reading 0 in
-+                 * the field and stranding the laptop at a halt prompt).  The
-+                 * NVRAM state is already written by this point -- rebooting is
-+                 * the documented path forward regardless of entry: the shim
-+                 * takes over on the next boot and applies the mask.
++                /* BRR: detect-only flow on Apple T2.
++                 *
++                 * T2 drops post-ExitBootServices NVRAM writes silently,
++                 * so the auto-reboot-to-shim chain never worked.  Flow:
++                 *   1. Run memtest tests (post-EBS, full accuracy).
++                 *   2. Display bad-address list clearly at pass end.
++                 *   3. Halt -- user powers off manually.
++                 *   4. On next boot, user picks grub entry 8
++                 *      (brr-entry.efi) and types addresses into a
++                 *      pre-EBS form.  That tool writes NVRAM via Boot
++                 *      Services (the path T2 DOES persist) and
++                 *      chainloads mask-shim.efi.
 +                 */
-+                extern uint32_t g_brr_flags_cached;
 +                extern unsigned badmem_log_count(void);
 +                extern void scroll(void);
-+                extern void check_input(void);
-+                extern void reboot(void);
 +
-+                uint32_t flags = g_brr_flags_cached;
 +                bool had_errors = (pass_num > 0) && (badmem_log_count() > 0);
 +
-+                /* Build marker -- proves the running binary is the fresh ISO
-+                 * (otherwise "did user actually flash?" is unanswerable). */
++                /* Build marker -- proves the running binary is the fresh ISO. */
 +                display_scrolled_message(0, "[build] " __DATE__ " " __TIME__);
 +                scroll();
 +
-+                display_scrolled_message(0,
-+                    "[auto] brr_flags=%x had_errors=%u",
-+                    (uintptr_t)flags,
-+                    (uintptr_t)(had_errors ? 1 : 0));
-+                scroll();
-+
 +                if (had_errors) {
-+                    display_scrolled_message(0, "[auto] pass complete with errors. Auto-reboot in 30s. ESC to reboot now.");
++                    display_scrolled_message(0, "[brr] detect pass complete -- halting.");
 +                    scroll();
-+                    for (int s = 30; s > 0; s--) {
-+                        display_scrolled_message(0, "[auto] rebooting in %2i s ...", s);
-+                        for (int k = 0; k < 10; k++) {
-+                            usleep(100000);
-+                            check_input();
-+                        }
-+                    }
-+                    reboot();
-+                    display_scrolled_message(0, "*** REBOOT FAILED ***");
++                    display_scrolled_message(0, "[brr] Photograph the address list above.");
 +                    scroll();
-+                    display_scrolled_message(0, "NVRAM state IS written. Press power, boot USB, shim applies mask.");
++                    display_scrolled_message(0, "[brr] Power off, boot USB, pick entry 8 to apply mask.");
 +                    scroll();
 +                    while (1) { __asm__ __volatile__("cli; hlt"); }
 +                }

@@ -1127,12 +1127,22 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
 // on A1990).  Called from main.c::global_init after screen_init.
 void brr_preboot_log_dump(void)
 {
-    // Unconditional header: tells us at a glance whether the struct
-    // is reachable in .data (magic should be 0xB007B007 always) and
-    // whether efi_menu added anything on top of the init marker.
-    display_scrolled_message(0, "=== pre-EBS log: magic=%x len=%u ===",
-                              (uintptr_t)g_brr_preboot.magic,
-                              (uintptr_t)g_brr_preboot.len);
+    // Self-test: can main.c read/write g_brr_preboot at this moment?
+    // Comparing address reported here against the one efi_menu writes
+    // to (via a separate print) tells us if the two contexts see the
+    // same instance.  If addresses match + self-test passes but log is
+    // empty, efi_menu's writes got wiped between pre-EBS and main.
+    unsigned saved_len = g_brr_preboot.len;
+    g_brr_preboot.len = 0xCAFE;
+    unsigned probe = g_brr_preboot.len;
+    g_brr_preboot.len = saved_len;
+
+    display_scrolled_message(0,
+        "=== pre-EBS log: addr=%x magic=%x len=%u probe=%x ===",
+        (uintptr_t)&g_brr_preboot,
+        (uintptr_t)g_brr_preboot.magic,
+        (uintptr_t)g_brr_preboot.len,
+        (uintptr_t)probe);
     scroll();
 
     if (g_brr_preboot.len == 0) {
