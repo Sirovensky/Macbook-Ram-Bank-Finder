@@ -169,12 +169,16 @@ struct brr_preboot_log g_brr_preboot = {
     "[init] preboot buf alive\n\n"
 };
 
-// Write narrow ASCII content to a file at the USB ESP root.  Returns 0
-// on success, EFI status on failure (use print_string to log since
-// ConOut may not be usable post-EBS).  Called from badmem_log.c at
-// pass end — this is POST-ExitBootServices, which is the dangerous
-// moment: Apple T2 may have torn down the filesystem driver function
-// pointers.  We still try: cost is a fault-halt at worst.
+// Write narrow ASCII content to a file on the USB ESP.  Returns:
+//    0 = success (write + readback round-trip confirmed)
+//   -1 = no SFS handle available
+//   -2 = open failed
+//   -3 = write failed
+//   -4 = readback open failed
+//   -5 = readback length mismatch
+//   -6 = readback content mismatch
+// Return codes are distinct so pass-end screen tells user exactly
+// where the failure was.
 int brr_fs_write_file(const efi_char16_t *path, unsigned path_chars,
                       const char *content, unsigned len)
 {
@@ -186,14 +190,49 @@ int brr_fs_write_file(const efi_char16_t *path, unsigned path_chars,
     efi_status_t s = root->open(root, &f, (efi_char16_t *)path,
         EFI_BRR_FILE_MODE_READ | EFI_BRR_FILE_MODE_WRITE |
         EFI_BRR_FILE_MODE_CREATE, 0);
-    if (s != EFI_SUCCESS || !f) return (int)(s & 0xFF);
+    if (s != EFI_SUCCESS || !f) return -2;
 
     f->set_position(f, 0);
     uintn_t wlen = len;
     s = f->write(f, &wlen, (void *)content);
     f->flush(f);
     f->close(f);
-    return (s == EFI_SUCCESS) ? 0 : (int)(s & 0xFF);
+    if (s != EFI_SUCCESS) return -3;
+
+    // Read-verify: re-open, read back, byte-compare against original.
+    // Catches silent-success writes on read-only / cached mounts.
+    efi_brr_file_t *rf = 0;
+    s = root->open(root, &rf, (efi_char16_t *)path,
+        EFI_BRR_FILE_MODE_READ, 0);
+    if (s != EFI_SUCCESS || !rf) return -4;
+
+    // Read into a local buffer (cap at 1 KiB for stack safety; our
+    // state/pages files are much smaller than that).
+    static char rb[1024];
+    uintn_t rlen = sizeof(rb);
+    if (rlen > len + 16) rlen = len + 16;
+    s = rf->read(rf, &rlen, rb);
+    rf->close(rf);
+    if (s != EFI_SUCCESS) return -4;
+    if (rlen != len) return -5;
+    for (unsigned i = 0; i < len; i++) {
+        if (rb[i] != content[i]) return -6;
+    }
+    return 0;
+}
+
+// Create directory if missing; silent no-op if present or error.
+// Separate from brr_fs_write_file because mkdir has to be idempotent
+// and the attribute flag differs.
+static void brr_fs_mkdir(const efi_char16_t *path)
+{
+    if (!BRR_FS_ROOT_VALID(g_brr_fs_root)) return;
+    efi_brr_file_t *f = 0;
+    efi_status_t s = g_brr_fs_root->open(g_brr_fs_root, &f,
+        (efi_char16_t *)path,
+        EFI_BRR_FILE_MODE_READ | EFI_BRR_FILE_MODE_WRITE |
+        EFI_BRR_FILE_MODE_CREATE, 0x10 /* EFI_FILE_DIRECTORY */);
+    if (s == EFI_SUCCESS && f) f->close(f);
 }
 
 // LoadImage / StartImage fn-pointer types (fields are `void *` in efi.h).
@@ -752,11 +791,23 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
             s = fs->open_volume(fs, &root);
             if (s != EFI_SUCCESS || !root) { con_puts("open_volume fail\r\n"); continue; }
 
-            // Write test marker to \EFI\BOOT\brr-boot.txt (known-writable
-            // subdirectory since grub itself lives there, unlike the
-            // FAT root which may have entry-count limits on a small ESP).
+            // Create \EFI\BRR\ subdirectory.  Grub lives in \EFI\BOOT\
+            // so we avoid that path (memtest/shim binaries could clash).
+            static efi_char16_t dpath[] = {
+                '\\','E','F','I','\\','B','R','R', 0
+            };
+            {
+                efi_brr_file_t *d = 0;
+                efi_status_t sd = root->open(root, &d, dpath,
+                    EFI_BRR_FILE_MODE_READ | EFI_BRR_FILE_MODE_WRITE |
+                    EFI_BRR_FILE_MODE_CREATE, 0x10 /* directory */);
+                if (sd == EFI_SUCCESS && d) d->close(d);
+            }
+
+            // Write test marker to \EFI\BRR\boot.txt.  Dedicated subdir
+            // nothing else (grub, memtest, shim) touches.
             static efi_char16_t tpath[] = {
-                '\\','E','F','I','\\','B','O','O','T','\\','b','r','r','-','b','o','o','t','.','t','x','t', 0
+                '\\','E','F','I','\\','B','R','R','\\','b','o','o','t','.','t','x','t', 0
             };
             efi_brr_file_t *f = 0;
             s = root->open(root, &f, tpath,
@@ -868,9 +919,9 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
         // drop NVRAM entirely.
         if (BRR_FS_ROOT_VALID(g_brr_fs_root)) {
             static const efi_char16_t files[][32] = {
-                { '\\','E','F','I','\\','B','O','O','T','\\','b','r','r','-','b','o','o','t','.','t','x','t', 0 },
-                { '\\','E','F','I','\\','B','O','O','T','\\','b','r','r','-','s','t','a','t','e','.','t','x','t', 0 },
-                { '\\','E','F','I','\\','B','O','O','T','\\','b','r','r','-','p','a','g','e','s','.','t','x','t', 0 },
+                { '\\','E','F','I','\\','B','R','R','\\','b','o','o','t','.','t','x','t', 0 },
+                { '\\','E','F','I','\\','B','R','R','\\','s','t','a','t','e','.','t','x','t', 0 },
+                { '\\','E','F','I','\\','B','R','R','\\','p','a','g','e','s','.','t','x','t', 0 },
             };
             static const char *labels[] = { "brr-boot", "brr-state", "brr-pages" };
             for (int idx = 0; idx < 3; idx++) {

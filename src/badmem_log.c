@@ -471,14 +471,14 @@ void badmem_log_flush_nvram(void)
     // halt on the next line, which is also acceptable at this point).
     extern int brr_fs_write_file(const efi_char16_t *, unsigned,
                                   const char *, unsigned);
-    // Paths under \EFI\BOOT\ — this subdirectory provably exists and is
-    // writable on our USB ESP (grub lives here).  FAT root has entry-
-    // count limits on small ESPs; subdirectory does not.
+    // Paths under \EFI\BRR\ — dedicated subdirectory nothing else
+    // (grub, memtest, mask-shim binaries) touches, so we won't be
+    // overwritten.  Created by efi_menu on every boot (idempotent).
     static const efi_char16_t path_state[] = {
-        '\\','E','F','I','\\','B','O','O','T','\\','b','r','r','-','s','t','a','t','e','.','t','x','t', 0
+        '\\','E','F','I','\\','B','R','R','\\','s','t','a','t','e','.','t','x','t', 0
     };
     static const efi_char16_t path_pages[] = {
-        '\\','E','F','I','\\','B','O','O','T','\\','b','r','r','-','p','a','g','e','s','.','t','x','t', 0
+        '\\','E','F','I','\\','B','R','R','\\','p','a','g','e','s','.','t','x','t', 0
     };
 
     // State file: single-line state string + newline.
