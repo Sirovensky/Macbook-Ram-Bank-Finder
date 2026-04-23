@@ -73,6 +73,8 @@ static const CHAR16 * const MACOS_ALT_PATHS[] = {
     L"\\System\\Library\\CoreServices\\boot.efi",  // HFS+ / Catalina-era
     L"\\boot.efi",                                  // Sonoma/Sequoia Preboot simplified
     L"\\boot\\boot.efi",                            // some nested Preboot layouts
+    L"\\cryptex1\\current\\System\\Library\\CoreServices\\boot.efi",  // Sonoma cryptex
+    L"\\Cryptexes\\OS\\System\\Library\\CoreServices\\boot.efi",       // alt Sonoma
     L"\\com.apple.recovery.boot\\boot.efi",         // Recovery partition
     L"\\usr\\standalone\\i386\\boot.efi",           // firmware staging
     0
@@ -995,6 +997,87 @@ static EFI_STATUS try_path(EFI_SYSTEM_TABLE *st,
     return EFI_SUCCESS;
 }
 
+// Recursive hunt: walk directory tree under `cur` up to `max_depth`
+// looking for any file literally named "boot.efi" (case-insensitive).
+// First hit wins.  On success builds a path relative to the ORIGINAL
+// volume root into `abs_path_buf` (caller passes same buffer each
+// recursion level; `prefix_len` tracks current depth offset in it).
+//
+// Uses cur->Open with relative single-component names (Apple firmware
+// handles these correctly) to avoid re-rooting issues.
+static EFI_STATUS bfs_find_boot_efi(EFI_FILE_PROTOCOL *cur,
+                                     CHAR16 *abs_path_buf, UINTN cap,
+                                     UINTN prefix_len,
+                                     int depth, int max_depth)
+{
+    if (!cur) return EFI_NOT_FOUND;
+    EFI_STATUS s = cur->SetPosition(cur, 0);
+    if (s != EFI_SUCCESS) return EFI_NOT_FOUND;
+
+    static UINT8 bfs_dirent[4096];
+    for (;;) {
+        UINTN sz = sizeof(bfs_dirent);
+        s = cur->Read(cur, &sz, bfs_dirent);
+        if (s == EFI_BUFFER_TOO_SMALL) continue;
+        if (s != EFI_SUCCESS || sz == 0) break;
+
+        UINT64 attrs = *(UINT64 *)(bfs_dirent + FILEINFO_ATTR_OFFS);
+        CHAR16 *name = (CHAR16 *)(bfs_dirent + FILEINFO_FNAME_OFFS);
+        if (name[0] == 0) continue;
+        if (name[0] == L'.' && name[1] == 0) continue;
+        if (name[0] == L'.' && name[1] == L'.' && name[2] == 0) continue;
+
+        int is_dir = (attrs & 0x10) ? 1 : 0;
+
+        if (!is_dir) {
+            // case-insensitive match on "boot.efi"
+            int match = 1;
+            const CHAR16 *want = L"boot.efi";
+            for (UINTN k = 0; k < 9; k++) {
+                CHAR16 a = name[k], b = want[k];
+                if (a >= L'A' && a <= L'Z') a = (CHAR16)(a - L'A' + L'a');
+                if (a != b) { match = 0; break; }
+            }
+            if (match) {
+                UINTN pos = prefix_len;
+                if (pos + 1 < cap) abs_path_buf[pos++] = L'\\';
+                for (UINTN k = 0; name[k] && pos + 1 < cap; k++)
+                    abs_path_buf[pos++] = name[k];
+                abs_path_buf[pos] = 0;
+                return EFI_SUCCESS;
+            }
+            continue;
+        }
+
+        if (depth >= max_depth) continue;
+
+        // Save sibling-cursor state in prefix_buf (append "\name")
+        UINTN saved_len = prefix_len;
+        UINTN cp = prefix_len;
+        if (cp + 1 >= cap) continue;
+        abs_path_buf[cp++] = L'\\';
+        UINTN name_start = cp;
+        for (UINTN k = 0; name[k] && cp + 1 < cap; k++)
+            abs_path_buf[cp++] = name[k];
+        abs_path_buf[cp] = 0;
+
+        // Relative single-component Open
+        EFI_FILE_PROTOCOL *sub = NULL;
+        EFI_STATUS so = cur->Open(cur, &sub, abs_path_buf + name_start,
+                                   EFI_FILE_MODE_READ, 0);
+        if (so == EFI_SUCCESS && sub) {
+            EFI_STATUS rs = bfs_find_boot_efi(sub, abs_path_buf, cap, cp,
+                                               depth + 1, max_depth);
+            sub->Close(sub);
+            if (rs == EFI_SUCCESS) return EFI_SUCCESS;
+        }
+
+        abs_path_buf[saved_len] = 0;  // restore
+    }
+
+    return EFI_NOT_FOUND;
+}
+
 // Try each candidate macOS boot.efi path under `root` on the given handle.
 // Returns EFI_SUCCESS on first hit, writing *out_path via build_file_device_path.
 //
@@ -1071,6 +1154,23 @@ static EFI_STATUS try_open_candidates(EFI_SYSTEM_TABLE *st,
             full_path[pos] = 0;
 
             s = try_path(st, device, root, full_path, out_path);
+            if (s == EFI_SUCCESS) return s;
+        }
+    }
+
+    // Tier 4 (last resort): recursive walk up to 4 levels deep, any file
+    // literally named boot.efi gets validated via try_path.  Expensive
+    // but guaranteed to find whatever Apple moved boot.efi to on newer
+    // macOS layouts (cryptex / sealed-system / Sonoma+).
+    {
+        static CHAR16 bfs_path[512];
+        bfs_path[0] = 0;
+        EFI_STATUS fs = bfs_find_boot_efi(root, bfs_path,
+                                           sizeof(bfs_path) / sizeof(bfs_path[0]),
+                                           0 /* prefix_len */,
+                                           0 /* depth */, 4 /* max_depth */);
+        if (fs == EFI_SUCCESS && bfs_path[0]) {
+            s = try_path(st, device, root, bfs_path, out_path);
             if (s == EFI_SUCCESS) return s;
         }
     }

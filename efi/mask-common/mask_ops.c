@@ -355,6 +355,12 @@ static void save_existing_boot_entries(EFI_SYSTEM_TABLE *st)
 // Locate USB and internal ESP
 // ---------------------------------------------------------------------------
 
+// Find the USB SFS root.  Primary path: LoadedImage->DeviceHandle →
+// HandleProtocol(SFS).  Fallback: some firmware versions (notably Apple
+// T2) expose the caller's device as a partition handle without the SFS
+// protocol attached directly; in that case we iterate every SFS handle
+// and pick the one whose root contains a known BRR marker file
+// (\EFI\BOOT\mask-shim.efi or \EFI\BOOT\brr-entry.efi).
 static EFI_STATUS open_usb_root_ops(EFI_SYSTEM_TABLE *st, EFI_HANDLE img,
                                      EFI_FILE_PROTOCOL **root_out)
 {
@@ -363,12 +369,60 @@ static EFI_STATUS open_usb_root_ops(EFI_SYSTEM_TABLE *st, EFI_HANDLE img,
         img, (EFI_GUID *)&lip_guid_ops, (void **)&li);
     if (s != EFI_SUCCESS) return s;
 
+    // Primary: SFS right on our device handle.
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = NULL;
     s = st->BootServices->HandleProtocol(
         li->DeviceHandle, (EFI_GUID *)&sfs_guid_ops, (void **)&sfs);
+    if (s == EFI_SUCCESS && sfs) {
+        s = sfs->OpenVolume(sfs, root_out);
+        if (s == EFI_SUCCESS) return s;
+    }
+
+    // Fallback: scan every SFS handle, probe for a BRR marker file.
+    EFI_HANDLE *handles = NULL;
+    UINTN buf_sz = 0;
+    s = st->BootServices->LocateHandle(
+        EFI_LOCATE_BY_PROTOCOL, (EFI_GUID *)&sfs_guid_ops, NULL, &buf_sz, NULL);
+    if (s != EFI_BUFFER_TOO_SMALL && s != EFI_SUCCESS) return s;
+
+    s = st->BootServices->AllocatePool(EfiLoaderData, buf_sz, (void **)&handles);
     if (s != EFI_SUCCESS) return s;
 
-    return sfs->OpenVolume(sfs, root_out);
+    s = st->BootServices->LocateHandle(
+        EFI_LOCATE_BY_PROTOCOL, (EFI_GUID *)&sfs_guid_ops, NULL, &buf_sz, handles);
+    if (s != EFI_SUCCESS) { st->BootServices->FreePool(handles); return s; }
+
+    UINTN n = buf_sz / sizeof(EFI_HANDLE);
+    static const CHAR16 MARKER_A[] = L"\\EFI\\BOOT\\mask-shim.efi";
+    static const CHAR16 MARKER_B[] = L"\\EFI\\BOOT\\brr-entry.efi";
+
+    for (UINTN i = 0; i < n; i++) {
+        EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *csfs = NULL;
+        s = st->BootServices->HandleProtocol(
+            handles[i], (EFI_GUID *)&sfs_guid_ops, (void **)&csfs);
+        if (s != EFI_SUCCESS) continue;
+
+        EFI_FILE_PROTOCOL *croot = NULL;
+        s = csfs->OpenVolume(csfs, &croot);
+        if (s != EFI_SUCCESS) continue;
+
+        EFI_FILE_PROTOCOL *probe = NULL;
+        EFI_STATUS s1 = croot->Open(croot, &probe, (CHAR16 *)MARKER_A,
+                                     EFI_FILE_MODE_READ, 0);
+        EFI_STATUS s2 = (s1 == EFI_SUCCESS) ? EFI_SUCCESS :
+            croot->Open(croot, &probe, (CHAR16 *)MARKER_B,
+                         EFI_FILE_MODE_READ, 0);
+        if (s1 == EFI_SUCCESS || s2 == EFI_SUCCESS) {
+            if (probe) probe->Close(probe);
+            *root_out = croot;
+            st->BootServices->FreePool(handles);
+            return EFI_SUCCESS;
+        }
+        croot->Close(croot);
+    }
+
+    st->BootServices->FreePool(handles);
+    return EFI_NOT_FOUND;
 }
 
 static EFI_STATUS open_internal_esp_ops(EFI_SYSTEM_TABLE *st, EFI_HANDLE usb_dev,
