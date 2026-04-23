@@ -10,7 +10,7 @@
 +            // NVRAM writes intentionally NOT called here: Apple T2 does
 +            // not persist post-ExitBootServices runtime SetVariable even
 +            // when the call returns SUCCESS.  The pre-EBS brr-entry.efi
-+            // tool (grub entry 8) handles state persistence instead.
++            // tool (grub entry 3) handles state persistence instead.
 +
 +            // Chip / row decode (shows which physical chip failed).
 +            extern void board_decode_pass(void);
@@ -31,7 +31,7 @@
 +                    scroll();
 +                    display_scrolled_message(0, "[brr] Photograph the address list above.");
 +                    scroll();
-+                    display_scrolled_message(0, "[brr] Power off, boot USB, pick entry 8 to apply mask.");
++                    display_scrolled_message(0, "[brr] Power off, boot USB, pick entry 3 to apply mask.");
 +                    scroll();
 +                    while (1) { __asm__ __volatile__("cli; hlt"); }
 +                }
