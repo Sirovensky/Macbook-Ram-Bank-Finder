@@ -61,8 +61,6 @@ static const CHAR16 LEGACY_VARNAME_BADROWS[]= L"A1990BadRows";
 // (HFS+) puts it at the root-level path.  Recovery volume uses a distinct
 // prefix.  The finder below tries root-level first, then scans 1–2 levels
 // of subdirectories, covering every known layout.
-static const CHAR16 MACOS_BOOT_PATH[] =
-    L"\\System\\Library\\CoreServices\\boot.efi";
 static const CHAR16 MACOS_BOOT_SUFFIX[] =
     L"\\System\\Library\\CoreServices\\boot.efi";
 
@@ -98,10 +96,10 @@ static EFI_STATUS resolve_chip_entries(EFI_SYSTEM_TABLE *st,
 static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
                                    EFI_HANDLE image_handle,
                                    EFI_HANDLE *out_device,
-                                   EFI_DEVICE_PATH_PROTOCOL **out_path);
+                                   EFI_DEVICE_PATH_PROTOCOL **out_path,
+                                   EFI_HANDLE *out_image);
 static EFI_STATUS chainload_macos(EFI_SYSTEM_TABLE *st, EFI_HANDLE self,
-                                   EFI_HANDLE device,
-                                   EFI_DEVICE_PATH_PROTOCOL *path);
+                                   EFI_HANDLE loaded_image);
 static void handle_nvram_state(EFI_SYSTEM_TABLE *st, EFI_HANDLE image,
                                 int *skip_mask, int *force_chip);
 static CHAR16 prompt_confirm(EFI_SYSTEM_TABLE *st, unsigned timeout_s);
@@ -953,47 +951,81 @@ static UINTN path_join(CHAR16 *out, UINTN cap,
 // (2) building a device path, (3) doing a LoadImage dry-run to confirm the
 // file is a loadable PE image.  Only returns EFI_SUCCESS if both steps pass.
 //
-// Context: on some Apple firmware versions, `root->Open` returns EFI_SUCCESS
-// for non-existent paths under `\EFI\...`, which made find_macos_boot claim
-// FOUND on the USB ESP only for the subsequent LoadImage (against a device
-// path built for that same path) to fail with EFI_NOT_FOUND.  Validating
-// via LoadImage here closes that gap — if LoadImage works the image is
-// genuinely loadable and the caller can StartImage without re-loading.
+// Context: on T2 macOS, LoadImage(DevicePath) against Apple's boot.efi
+// returns EFI_ACCESS_DENIED regardless of BootPolicy setting — T2
+// refuses to chainload the signed target from an unsigned caller via
+// device-path.  Same limitation that made Boot0080 fallback fail.
 //
-// The loaded image is immediately Unloaded; the caller re-loads later via
-// chainload_macos() so the full-ownership flow (StartImage) is unambiguous.
+// Workaround (same one OpenCore uses under No Security): read the file
+// bytes manually via SFS, then call LoadImage with SourceBuffer=<bytes>
+// and DevicePath=NULL.  Under Apple's No Security model, the unsigned-
+// load rules apply and the image starts successfully.
+//
+// This try_path:
+//   1. Opens the file via SFS.
+//   2. Reads entire contents into an AllocatePool buffer.
+//   3. LoadImage(SourceBuffer) — if success, we have a loaded image
+//      handle ready for StartImage.
+//   4. Returns the handle (via *out_image) so caller StartImages it
+//      without re-reading the file.
+//
+// The build_file_device_path output (*out_path) is also produced for
+// diagnostic purposes and for StartImage's LoadedImage lookup.
 static EFI_STATUS try_path(EFI_SYSTEM_TABLE *st,
                             EFI_HANDLE device,
                             EFI_FILE_PROTOCOL *root,
                             const CHAR16 *path,
-                            EFI_DEVICE_PATH_PROTOCOL **out_path)
+                            EFI_DEVICE_PATH_PROTOCOL **out_path,
+                            EFI_HANDLE *out_image)
 {
+    // Open the candidate file.
     EFI_FILE_PROTOCOL *f = NULL;
     EFI_STATUS s = root->Open(root, &f, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
     if (s != EFI_SUCCESS) return s;
+
+    // Query file size via GetInfo.
+    static const EFI_GUID fi_guid_local = EFI_FILE_INFO_GUID;
+    static UINT8 info_buf[512];
+    UINTN info_sz = sizeof(info_buf);
+    s = f->GetInfo(f, (EFI_GUID *)&fi_guid_local, &info_sz, info_buf);
+    if (s != EFI_SUCCESS) { f->Close(f); return s; }
+    UINT64 file_size = *(UINT64 *)(info_buf + 8);  // EFI_FILE_INFO.FileSize
+    if (file_size == 0 || file_size > 32 * 1024 * 1024) {
+        // Sanity: boot.efi is typically 1-3 MiB, reject > 32 MiB.
+        f->Close(f);
+        return EFI_UNSUPPORTED;
+    }
+
+    // Allocate pool for file contents.
+    void *buf = NULL;
+    s = st->BootServices->AllocatePool(EfiLoaderData, (UINTN)file_size, &buf);
+    if (s != EFI_SUCCESS) { f->Close(f); return s; }
+
+    UINTN rd = (UINTN)file_size;
+    s = f->Read(f, &rd, buf);
     f->Close(f);
+    if (s != EFI_SUCCESS || rd != (UINTN)file_size) {
+        st->BootServices->FreePool(buf);
+        return (s == EFI_SUCCESS) ? EFI_LOAD_ERROR : s;
+    }
 
+    // Build device path for StartImage/LoadedImage reference (cosmetic).
     EFI_DEVICE_PATH_PROTOCOL *dp = NULL;
-    s = build_file_device_path(st, device, path, &dp);
-    if (s != EFI_SUCCESS) return s;
+    (void)build_file_device_path(st, device, path, &dp);
 
-    // Dry-run LoadImage to confirm the path is genuinely loadable.
-    // BootPolicy=TRUE: use boot-manager semantics (accepted under T2
-    // "No Security"); BootPolicy=FALSE would trip Secure Boot auth.
-    // We don't keep the loaded image — caller will re-load via
-    // chainload_macos() so the StartImage handoff is unambiguous.
-    EFI_HANDLE probe_img = NULL;
-    s = st->BootServices->LoadImage(1, device, dp, NULL, 0, &probe_img);
+    // LoadImage with SourceBuffer.  BootPolicy=FALSE for buffer-backed
+    // loads (we're not delegating to firmware boot manager).
+    EFI_HANDLE loaded = NULL;
+    s = st->BootServices->LoadImage(0, device, dp, buf, (UINTN)file_size,
+                                     &loaded);
+    st->BootServices->FreePool(buf);  // firmware copied what it needed
     if (s != EFI_SUCCESS) {
-        st->BootServices->FreePool(dp);
+        if (dp) st->BootServices->FreePool(dp);
         return s;
     }
-    // probe_img is leaked until ExitBootServices — small (~2 MiB) and
-    // ephemeral.  UnloadImage isn't in our minimal efi_types.h and the
-    // leak is harmless in the boot-phase-only lifetime.
-    (void)probe_img;
 
-    *out_path = dp;
+    *out_image = loaded;
+    *out_path  = dp;
     return EFI_SUCCESS;
 }
 
@@ -1096,14 +1128,15 @@ static EFI_STATUS bfs_find_boot_efi(EFI_FILE_PROTOCOL *cur,
 static EFI_STATUS try_open_candidates(EFI_SYSTEM_TABLE *st,
                                        EFI_HANDLE device,
                                        EFI_FILE_PROTOCOL *root,
-                                       EFI_DEVICE_PATH_PROTOCOL **out_path)
+                                       EFI_DEVICE_PATH_PROTOCOL **out_path,
+                                       EFI_HANDLE *out_image)
 {
     static CHAR16 full_path[512];
     EFI_STATUS s;
 
     // Tier 1: fixed root-level candidates.
     for (unsigned i = 0; MACOS_ALT_PATHS[i]; i++) {
-        s = try_path(st, device, root, MACOS_ALT_PATHS[i], out_path);
+        s = try_path(st, device, root, MACOS_ALT_PATHS[i], out_path, out_image);
         if (s == EFI_SUCCESS) return s;
     }
 
@@ -1121,7 +1154,7 @@ static EFI_STATUS try_open_candidates(EFI_SYSTEM_TABLE *st,
         for (unsigned ai = 0; MACOS_ALT_PATHS[ai]; ai++) {
             path_join(full_path, sizeof(full_path) / sizeof(full_path[0]),
                       L"\\", name, MACOS_ALT_PATHS[ai]);
-            s = try_path(st, device, root, full_path, out_path);
+            s = try_path(st, device, root, full_path, out_path, out_image);
             if (s == EFI_SUCCESS) return s;
         }
 
@@ -1153,7 +1186,7 @@ static EFI_STATUS try_open_candidates(EFI_SYSTEM_TABLE *st,
                 full_path[pos++] = MACOS_BOOT_SUFFIX[k];
             full_path[pos] = 0;
 
-            s = try_path(st, device, root, full_path, out_path);
+            s = try_path(st, device, root, full_path, out_path, out_image);
             if (s == EFI_SUCCESS) return s;
         }
     }
@@ -1170,7 +1203,7 @@ static EFI_STATUS try_open_candidates(EFI_SYSTEM_TABLE *st,
                                            0 /* prefix_len */,
                                            0 /* depth */, 4 /* max_depth */);
         if (fs == EFI_SUCCESS && bfs_path[0]) {
-            s = try_path(st, device, root, bfs_path, out_path);
+            s = try_path(st, device, root, bfs_path, out_path, out_image);
             if (s == EFI_SUCCESS) return s;
         }
     }
@@ -1211,7 +1244,8 @@ static void connect_all_handles(EFI_SYSTEM_TABLE *st)
 static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
                                    EFI_HANDLE image_handle,
                                    EFI_HANDLE *out_device,
-                                   EFI_DEVICE_PATH_PROTOCOL **out_path)
+                                   EFI_DEVICE_PATH_PROTOCOL **out_path,
+                                   EFI_HANDLE *out_image)
 {
     static const EFI_GUID sfs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
     static const EFI_GUID bio_guid = EFI_BLOCK_IO_PROTOCOL_GUID;
@@ -1319,7 +1353,8 @@ static EFI_STATUS find_macos_boot(EFI_SYSTEM_TABLE *st,
                 efi_print(st, L"\r\n");
             }
 
-            found = try_open_candidates(st, handles[i], root, out_path);
+            found = try_open_candidates(st, handles[i], root, out_path,
+                                          out_image);
             root->Close(root);
 
             if (found == EFI_SUCCESS) {
@@ -1481,26 +1516,20 @@ static EFI_STATUS try_bootorder_chainload(EFI_SYSTEM_TABLE *st, EFI_HANDLE self)
 // Chain-load macOS.
 // ---------------------------------------------------------------------------
 
+// try_path already LoadImaged the candidate via SourceBuffer and gave
+// us the handle.  Just StartImage it.
 static EFI_STATUS chainload_macos(EFI_SYSTEM_TABLE *st, EFI_HANDLE self,
-                                   EFI_HANDLE device,
-                                   EFI_DEVICE_PATH_PROTOCOL *path)
+                                   EFI_HANDLE loaded_image)
 {
-    (void)device;
-    EFI_HANDLE new_image = NULL;
-    EFI_STATUS s = st->BootServices->LoadImage(
-        1 /*BootPolicy=true — T2-compat*/, self, path, NULL, 0, &new_image);
-    if (s != EFI_SUCCESS) {
-        efi_print(st, L"[shim] LoadImage failed: ");
-        efi_print_hex(st, (UINT64)s);
-        efi_print(st, L"\r\n");
-        return s;
-    }
+    (void)self;
+    if (!loaded_image) return EFI_INVALID_PARAMETER;
 
     efi_print(st, L"[shim] starting macOS boot.efi...\r\n");
 
     UINTN exit_sz = 0;
     CHAR16 *exit_data = NULL;
-    s = st->BootServices->StartImage(new_image, &exit_sz, &exit_data);
+    EFI_STATUS s = st->BootServices->StartImage(loaded_image, &exit_sz,
+                                                  &exit_data);
     // If we reach here, StartImage returned — something went wrong in macOS.
     efi_print(st, L"[shim] macOS boot.efi returned: ");
     efi_print_hex(st, (UINT64)s);
@@ -1895,43 +1924,33 @@ page_mode:
         }
     }
 
-    // Installed-mode exit path: when loaded by the firmware boot manager
-    // from \EFI\BRR\mask-shim.efi (via the BootNNNN entry installed by
-    // brr-entry), we DON'T try to chainload macOS ourselves.  Apple's
-    // boot.efi lives inside sealed cryptex volumes that aren't visible
-    // through plain SFS; and Apple's Boot0080 entry rejects unsigned
-    // LoadImage callers with EFI_ACCESS_DENIED even under No Security.
+    // On T2, LoadImage with DevicePath consistently fails
+    // with EFI_ACCESS_DENIED even for Boot0080 under No Security —
+    // Apple refuses to let an unsigned caller chainload a signed target
+    // via device-path.  Return-and-fall-through to the next BootOrder
+    // entry was tested and also fails (firmware displays prohibition).
     //
-    // Instead, return EFI_NOT_FOUND and let the firmware boot manager
-    // move to the next entry in BootOrder (Apple's own Boot0080 = macOS).
-    // The firmware's own code path honours Secure Boot correctly, AND
-    // our AllocatePages(EfiReservedMemoryType) reservations persist in
-    // the UEFI memory map all the way through ExitBootServices — macOS
-    // sees the bad pages as Reserved and routes around them.
+    // The remaining workable approach (same one OpenCore uses) is:
+    // read the target boot.efi file contents into memory via SFS, then
+    // call LoadImage with SourceBuffer=file-bytes and DevicePath=NULL.
+    // This bypasses the device-path policy check and loads the image
+    // under the normal unsigned-load rules No Security permits.
     //
-    // This is the entire reason the installed flow works without a
-    // signing chain: we're not IN the chain, we just mark memory first.
-    if (installed) {
-        efi_print(st, L"\r\n");
-        efi_print(st, L"[shim] mask applied.  Returning control to firmware\r\n");
-        efi_print(st, L"[shim] boot manager so it can run Apple's boot.efi\r\n");
-        efi_print(st, L"[shim] (Boot0080) via the standard T2-signed path.\r\n");
-        efi_print(st, L"[shim] The reservations persist in the memory map.\r\n");
-        efi_stall_ms(st, 2500);
-        return EFI_NOT_FOUND;  // tells boot manager: try next BootOrder entry
-    }
+    // That lives in try_path() / chainload_macos(), which both now use
+    // a SourceBuffer path.  So here we just always try the full scan
+    // regardless of install mode.
+    (void)installed;
 
-    // USB-chainloaded mode: we were invoked by brr-entry.efi, which wants
-    // us to complete the chainload.  Brr-entry doesn't iterate BootOrder.
-    // So here we try to find boot.efi directly, then fall back to Boot####.
     // 3a. Primary: enumerate SFS volumes for boot.efi at known paths.
     EFI_HANDLE boot_device = NULL;
     EFI_DEVICE_PATH_PROTOCOL *boot_path = NULL;
-    EFI_STATUS s = find_macos_boot(st, image, &boot_device, &boot_path);
+    EFI_HANDLE boot_img = NULL;
+    EFI_STATUS s = find_macos_boot(st, image, &boot_device, &boot_path,
+                                     &boot_img);
     if (s == EFI_SUCCESS) {
-        efi_print(st, L"[shim] found macOS boot.efi\r\n");
+        efi_print(st, L"[shim] found macOS boot.efi (SourceBuffer load OK)\r\n");
         efi_stall_ms(st, 1000);
-        return chainload_macos(st, image, boot_device, boot_path);
+        return chainload_macos(st, image, boot_img);
     }
 
     // 3b. Fallback: try UEFI BootOrder.

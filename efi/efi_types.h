@@ -49,6 +49,7 @@ typedef bool        BOOLEAN;
 #define EFI_ABORTED             (0x8000000000000000ULL | 21)
 #define EFI_ACCESS_DENIED       (0x8000000000000000ULL | 15)
 #define EFI_OUT_OF_RESOURCES    (0x8000000000000000ULL | 9)
+#define EFI_LOAD_ERROR          (0x8000000000000000ULL | 1)
 
 // ---- GUID -------------------------------------------------------------------
 
