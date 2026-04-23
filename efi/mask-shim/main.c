@@ -67,11 +67,14 @@ static const CHAR16 MACOS_BOOT_SUFFIX[] =
     L"\\System\\Library\\CoreServices\\boot.efi";
 
 // Alternate root-level paths to try when the primary path misses.
-// Ordered by likelihood on a T2 macOS install.
+// Ordered by likelihood on a T2 macOS install.  Under UUID subdirs we
+// prefix each of these (see try_open_candidates tier-2 loop).
 static const CHAR16 * const MACOS_ALT_PATHS[] = {
-    L"\\System\\Library\\CoreServices\\boot.efi",             // HFS+ root
-    L"\\com.apple.recovery.boot\\boot.efi",                    // Recovery
-    L"\\usr\\standalone\\i386\\boot.efi",                      // firmware staging
+    L"\\System\\Library\\CoreServices\\boot.efi",  // HFS+ / Catalina-era
+    L"\\boot.efi",                                  // Sonoma/Sequoia Preboot simplified
+    L"\\boot\\boot.efi",                            // some nested Preboot layouts
+    L"\\com.apple.recovery.boot\\boot.efi",         // Recovery partition
+    L"\\usr\\standalone\\i386\\boot.efi",           // firmware staging
     0
 };
 
@@ -973,10 +976,12 @@ static EFI_STATUS try_path(EFI_SYSTEM_TABLE *st,
     if (s != EFI_SUCCESS) return s;
 
     // Dry-run LoadImage to confirm the path is genuinely loadable.
+    // BootPolicy=TRUE: use boot-manager semantics (accepted under T2
+    // "No Security"); BootPolicy=FALSE would trip Secure Boot auth.
     // We don't keep the loaded image — caller will re-load via
     // chainload_macos() so the StartImage handoff is unambiguous.
     EFI_HANDLE probe_img = NULL;
-    s = st->BootServices->LoadImage(0, device, dp, NULL, 0, &probe_img);
+    s = st->BootServices->LoadImage(1, device, dp, NULL, 0, &probe_img);
     if (s != EFI_SUCCESS) {
         st->BootServices->FreePool(dp);
         return s;
@@ -1339,9 +1344,17 @@ static EFI_STATUS try_bootorder_chainload(EFI_SYSTEM_TABLE *st, EFI_HANDLE self)
         efi_print(st, desc);
         efi_print(st, L"\r\n");
 
+        // BootPolicy=TRUE: tells firmware this is a boot-manager-style
+        // load.  On Apple T2, driver-load semantics (BootPolicy=FALSE)
+        // triggers a Secure Boot authentication path that rejects the
+        // unsigned calling image chain — result is EFI_ACCESS_DENIED +
+        // the prohibition-sign screen.  Boot-manager path is what the
+        // firmware itself uses when running Boot#### entries, and it
+        // accepts our chain under "No Security".
         EFI_HANDLE new_image = NULL;
         EFI_STATUS ls = st->BootServices->LoadImage(
-            0, self, (EFI_DEVICE_PATH_PROTOCOL *)dp, NULL, 0, &new_image);
+            1 /* BootPolicy=TRUE */, self, (EFI_DEVICE_PATH_PROTOCOL *)dp,
+            NULL, 0, &new_image);
         if (ls != EFI_SUCCESS) {
             efi_print(st, L"[shim]     LoadImage failed: ");
             efi_print_hex(st, (UINT64)ls);
@@ -1375,7 +1388,7 @@ static EFI_STATUS chainload_macos(EFI_SYSTEM_TABLE *st, EFI_HANDLE self,
     (void)device;
     EFI_HANDLE new_image = NULL;
     EFI_STATUS s = st->BootServices->LoadImage(
-        0 /*BootPolicy=false*/, self, path, NULL, 0, &new_image);
+        1 /*BootPolicy=true — T2-compat*/, self, path, NULL, 0, &new_image);
     if (s != EFI_SUCCESS) {
         efi_print(st, L"[shim] LoadImage failed: ");
         efi_print_hex(st, (UINT64)s);
