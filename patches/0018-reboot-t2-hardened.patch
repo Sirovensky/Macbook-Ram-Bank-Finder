@@ -1,12 +1,17 @@
 --- a/system/x86/hwctrl.c
 +++ b/system/x86/hwctrl.c
-@@ -60,29 +60,70 @@ void hwctrl_init(void)
+@@ -60,29 +60,51 @@
  #endif
  }
  
-+// BRR: verbose reboot diagnostics.  display_scrolled_message is a
-+// macro in app/display.h that expands to printf(scroll_message_row, ...).
-+// Include the header here so the macro resolves in this translation unit.
++// BRR: SHUTDOWN-only reboot.  T2 commits NVRAM to flash only on
++// graceful power-off (ResetSystem with EFI_RESET_SHUTDOWN).  Every
++// soft-reset path -- ResetSystem(WARM|COLD), port 0xCF9, KB-controller
++// pulse, triple fault, BIOS 0x472 magic -- skips the commit and
++// loses BrrMaskState + BrrBadPages writes we just made.  So we try
++// SHUTDOWN only, and halt if it fails -- the user must manually
++// press power to turn the laptop on again, which is the documented
++// flow.  Never reset; always shutdown.
 +#include "display.h"
 +extern void scroll(void);
 +
@@ -23,62 +28,42 @@
      if (efi_rs_table != NULL) {
 -        efi_rs_table->reset_system(EFI_RESET_COLD, 0, 0);
 -        usleep(1000000);
+-    }
 +        typedef void (efiapi *reset_fn_t)(int, int, uintn_t, void *);
 +        reset_fn_t do_reset = (reset_fn_t)(uintptr_t)efi_rs_table->reset_system;
-+
-+        /* SHUTDOWN first.  T2 commits NVRAM on graceful power-off;
-+         * WARM/COLD reset does NOT trigger flash commit.  User must
-+         * press power to turn on after — acceptable trade-off for
-+         * reliable NVRAM persistence. */
-+        display_scrolled_message(0, "[reboot] ResetSystem(SHUTDOWN) - commits NVRAM");
-+        scroll();
-+        do_reset(2, 0, 0, (void *)0);
-+        usleep(1000000);
-+
-+        display_scrolled_message(0, "[reboot] ResetSystem(WARM)");
-+        scroll();
-+        do_reset(1, 0, 0, (void *)0);
-+        usleep(500000);
-+
-+        display_scrolled_message(0, "[reboot] ResetSystem(COLD)");
-+        scroll();
-+        do_reset(0, 0, 0, (void *)0);
-+        usleep(500000);
-+    }
-+
-+    display_scrolled_message(0, "[reboot] port 0xCF9 hard reset");
-+    scroll();
-+    {
-+        uint8_t cf9 = inb(0xcf9) & ~6;
-+        outb(cf9|2, 0xcf9);
-+        usleep(50);
-+        outb(cf9|6, 0xcf9);
-+        usleep(500000);
-     }
  
 -     // Still here? try the PORT 0x64 method
-+    display_scrolled_message(0, "[reboot] PS/2 KB-controller reset");
-+    scroll();
-     outb(0xfe, 0x64);
+-    outb(0xfe, 0x64);
 -    usleep(150000);
-+    usleep(500000);
++        display_scrolled_message(0, "[reboot] ResetSystem(SHUTDOWN) -- commits T2 NVRAM");
++        scroll();
++        do_reset(2 /* EFI_RESET_SHUTDOWN */, 0, 0, (void *)0);
++        usleep(2000000);
  
-     if (efi_rs_table == NULL) {
+-    if (efi_rs_table == NULL) {
 -        // In last resort, (very) obsolete reboot method using BIOS
-         *((uint16_t *)0x472) = 0x1234;
+-        *((uint16_t *)0x472) = 0x1234;
++        /* SHUTDOWN is supposed to not return.  If it does, retry --
++         * occasionally the first call races with ExitBootServices state. */
++        for (int i = 0; i < 5; i++) {
++            display_scrolled_message(0, "[reboot] SHUTDOWN retry %i", i + 1);
++            scroll();
++            do_reset(2, 0, 0, (void *)0);
++            usleep(1000000);
++        }
      }
 +
-+    display_scrolled_message(0, "[reboot] ALL SOFT RESETS FILTERED -- triple fault");
++    /* SHUTDOWN path exhausted (or no EFI Runtime Services available).
++     * DO NOT fall back to WARM/COLD/CF9/KB/triple-fault -- any of those
++     * skips T2 NVRAM commit, which loses the state we just wrote.
++     * Halt and have the user hold power for 10 s.  Yes this loses the
++     * NVRAM commit too, but at least we don't silently clobber it with
++     * a half-successful warm reset that looks like it worked. */
++    display_scrolled_message(0, "[reboot] SHUTDOWN did not fire.");
 +    scroll();
-+#if defined(__x86_64__) || defined(__i386__)
-+    {
-+        struct { uint16_t limit; uint64_t base; } __attribute__((packed)) idtr = { 0, 0 };
-+        __asm__ __volatile__("lidt %0" : : "m"(idtr));
-+        __asm__ __volatile__("int3");
-+    }
-+#endif
-+
-+    display_scrolled_message(0, "[reboot] TRIPLE FAULT IGNORED -- halting. Hold power 10 s.");
++    display_scrolled_message(0, "[reboot] HOLD POWER 10 s to force off; do NOT pick Reset.");
++    scroll();
++    display_scrolled_message(0, "[reboot] After manual power-off, boot USB again for shim chain.");
 +    scroll();
 +    while (1) { __asm__ __volatile__("cli; hlt"); }
  }

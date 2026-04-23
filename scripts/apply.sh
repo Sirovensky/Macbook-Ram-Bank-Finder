@@ -196,10 +196,13 @@ apply_patch 0016-pass-progress-test-count.patch "BRR: pass% = completed tests" "
 # Suppress FAIL banner on A1990 (T2 keyboard can't dismiss it; overlay
 # covers end-of-pass summary + NVRAM messages + auto-reboot countdown).
 apply_patch 0017-no-fail-banner.patch "BRR: suppress the FAIL banner" "app/display.c"
-# T2-hardened reboot: try UEFI ResetSystem WARM+COLD, cf9, KB-ctrl,
-# then triple-fault as guaranteed last resort.  Default reboot()
-# fell through on A1990 because T2 blocks every soft-reset path.
-apply_patch 0018-reboot-t2-hardened.patch "BRR: verbose reboot diagnostics" "system/x86/hwctrl.c"
+# SHUTDOWN-only reboot.  T2 only flash-commits NVRAM on graceful
+# power-off (EFI_RESET_SHUTDOWN); every soft-reset path (WARM, COLD,
+# cf9, KB-ctrl, triple fault) skips the commit and loses the state
+# we just wrote.  So after NVRAM writes we call ResetSystem(SHUTDOWN)
+# only -- user presses power to turn on again -- and halt if firmware
+# rejects it (never fall back to a reset).
+apply_patch 0018-reboot-t2-hardened.patch "BRR: SHUTDOWN-only reboot" "system/x86/hwctrl.c"
 # Re-cache brr_flags after startup64.S BSS zero: efi_menu() wrote
 # g_brr_flags_cached pre-ExitBootServices but the asm BSS-zero loop
 # (startup64.S:258-268, triggered on first_boot=1) wipes it before
