@@ -1,7 +1,15 @@
 --- a/system/x86/hwctrl.c
 +++ b/system/x86/hwctrl.c
-@@ -54,27 +54,51 @@ void hwctrl_init(void)
+@@ -60,29 +60,66 @@ void hwctrl_init(void)
+ #endif
+ }
  
++// BRR: verbose reboot diagnostics.  display_scrolled_message is a
++// macro in app/display.h that expands to printf(scroll_message_row, ...).
++// Include the header here so the macro resolves in this translation unit.
++#include "display.h"
++extern void scroll(void);
++
  void reboot(void)
  {
 -    // Use cf9 method as first try
@@ -12,25 +20,30 @@
 -    usleep(50);
 -
 -    // If we have UEFI, try EFI reset service
-+    // BRR: T2-hardened reboot.  Default sequence doesn't actually reset
-+    // the system post-ExitBootServices on A1990 (cf9 intercepted by T2,
-+    // EFI reset filtered).  Try every path with delay, then triple-fault.
-+
-+    // 1 + 2: UEFI ResetSystem with proper 4-arg spec signature.
-+    // Memtest's typedef is 3-arg; cast to 4-arg form.  WARM first
-+    // (usually triggers NVRAM flash-commit), then COLD.
      if (efi_rs_table != NULL) {
 -        efi_rs_table->reset_system(EFI_RESET_COLD, 0, 0);
 -        usleep(1000000);
 +        typedef void (efiapi *reset_fn_t)(int, int, uintn_t, void *);
 +        reset_fn_t do_reset = (reset_fn_t)(uintptr_t)efi_rs_table->reset_system;
-+        do_reset(1 /*EFI_RESET_WARM*/, 0, 0, (void *)0);
++
++        display_scrolled_message(0, "[reboot] ResetSystem(WARM)");
++        scroll();
++        do_reset(1, 0, 0, (void *)0);
 +        usleep(500000);
-+        do_reset(0 /*EFI_RESET_COLD*/, 0, 0, (void *)0);
++
++        display_scrolled_message(0, "[reboot] ResetSystem(COLD)");
++        scroll();
++        do_reset(0, 0, 0, (void *)0);
++        usleep(500000);
++
++        display_scrolled_message(0, "[reboot] ResetSystem(SHUTDOWN)");
++        scroll();
++        do_reset(2, 0, 0, (void *)0);
 +        usleep(500000);
 +    }
 +
-+    // 3: Port 0xCF9 full reset (may be intercepted as shutdown on T2).
++    display_scrolled_message(0, "[reboot] port 0xCF9 hard reset");
++    scroll();
 +    {
 +        uint8_t cf9 = inb(0xcf9) & ~6;
 +        outb(cf9|2, 0xcf9);
@@ -40,7 +53,8 @@
      }
  
 -     // Still here? try the PORT 0x64 method
-+    // 4: Legacy PS/2 KB-controller reset.
++    display_scrolled_message(0, "[reboot] PS/2 KB-controller reset");
++    scroll();
      outb(0xfe, 0x64);
 -    usleep(150000);
 +    usleep(500000);
@@ -50,9 +64,8 @@
          *((uint16_t *)0x472) = 0x1234;
      }
 +
-+    // 5: Triple fault — guaranteed CPU reset.  Any x86 CPU cannot refuse.
-+    // Load null IDT; int3 then double-faults then triple-faults.  PCH
-+    // hardware turns that into a CPU INIT (power-on-equivalent reset).
++    display_scrolled_message(0, "[reboot] ALL SOFT RESETS FILTERED -- triple fault");
++    scroll();
 +#if defined(__x86_64__) || defined(__i386__)
 +    {
 +        struct { uint16_t limit; uint64_t base; } __attribute__((packed)) idtr = { 0, 0 };
@@ -61,6 +74,8 @@
 +    }
 +#endif
 +
++    display_scrolled_message(0, "[reboot] TRIPLE FAULT IGNORED -- halting. Hold power 10 s.");
++    scroll();
 +    while (1) { __asm__ __volatile__("cli; hlt"); }
  }
  

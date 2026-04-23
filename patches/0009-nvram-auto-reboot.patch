@@ -1,28 +1,20 @@
 --- a/app/main.c
 +++ b/app/main.c
-@@ -733,6 +733,72 @@ void main(void)
+@@ -733,6 +733,59 @@ void main(void)
              extern void badmem_log_dump(void);
              if (pass_num > 0)
                  badmem_log_dump();
-+            // BRR: force scroll_lock OFF so pass-end prints never wait.
 +            extern void set_scroll_lock(bool);
 +            set_scroll_lock(false);
-+            // BRR: single-threaded deferred decode of bad PAs captured
-+            // during the pass (error_hook only records PA fast+AP-safe).
 +            extern void board_decode_pass(void);
 +            if (pass_num > 0)
 +                board_decode_pass();
-+            // BRR: flush accumulated bad pages to NVRAM as BrrBadPages.
 +            extern void badmem_log_flush_nvram(void);
 +            if (pass_num > 0)
 +                badmem_log_flush_nvram();
-+            // BRR: flush accumulated bad rows to BrrBadRows.
 +            extern void badmem_log_flush_rows_nvram(void);
 +            if (pass_num > 0)
 +                badmem_log_flush_rows_nvram();
-+            // BRR: auto-reboot + HALT.  Never continue to pass 2 after
-+            // a real pass with errors -- would clobber NVRAM state
-+            // the mask-shim needs on next boot.
 +            {
 +                boot_params_t *bp = (boot_params_t *)boot_params_addr;
 +                extern unsigned badmem_log_count(void);
@@ -32,6 +24,13 @@
 +
 +                bool auto_reboot = (bp->brr_flags & (1u << 2)) != 0;
 +                bool had_errors  = (pass_num > 0) && (badmem_log_count() > 0);
++
++                display_scrolled_message(0,
++                    "[auto] brr_flags=%x auto_reboot=%u had_errors=%u",
++                    (uintptr_t)bp->brr_flags,
++                    (uintptr_t)(auto_reboot ? 1 : 0),
++                    (uintptr_t)(had_errors ? 1 : 0));
++                scroll();
 +
 +                if (auto_reboot) {
 +                    display_scrolled_message(0, "[auto] pass complete. Auto-reboot in 30s. ESC to reboot now.");
@@ -44,21 +43,9 @@
 +                        }
 +                    }
 +                    reboot();
-+                    // reboot() should not return.  On T2 it sometimes
-+                    // does (cf9 reset treated as shutdown / firmware
-+                    // blocks ResetSystem post-EBS).  HALT rather than
-+                    // fall into pass 2 which would clobber NVRAM.
-+                    display_scrolled_message(0, "");
-+                    scroll();
 +                    display_scrolled_message(0, "*** REBOOT FAILED ***");
 +                    scroll();
-+                    display_scrolled_message(0, "T2 firmware rejected ResetSystem / port-cf9 reset.");
-+                    scroll();
-+                    display_scrolled_message(0, "NVRAM state IS written -- safe to force power cycle.");
-+                    scroll();
-+                    display_scrolled_message(0, "Hold power 10 s, then press power to boot USB again.");
-+                    scroll();
-+                    display_scrolled_message(0, "Next USB boot: mask-shim applies mask and loads macOS.");
++                    display_scrolled_message(0, "NVRAM state IS written. Hold power 10 s, boot USB again for shim.");
 +                    scroll();
 +                    while (1) { __asm__ __volatile__("cli; hlt"); }
 +                }
@@ -73,4 +60,3 @@
              if (error_count == 0) {
                  display_status("Pass   ");
                  display_big_status(true);
-
