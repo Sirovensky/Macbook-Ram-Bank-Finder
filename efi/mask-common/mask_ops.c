@@ -692,7 +692,8 @@ EFI_STATUS install_mask_full(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st,
         return s;
     }
 
-    efi_print(st, L"[mask-ops] boot slot: 0x");
+    // efi_print_hex prints its own "0x" prefix.
+    efi_print(st, L"[mask-ops] boot slot: ");
     efi_print_hex(st, slot);
     efi_print(st, L"\r\n");
 

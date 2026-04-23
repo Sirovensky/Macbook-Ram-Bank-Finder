@@ -1681,11 +1681,55 @@ static void handle_nvram_state(EFI_SYSTEM_TABLE *st, EFI_HANDLE image,
 
 // Note: gnu-efi's crt0 calls efi_main in System V ABI (rdi=image, rsi=st),
 // not Microsoft ABI.  Do NOT use EFIAPI here.
+// Detect whether this image was loaded from the internal ESP (via the
+// installed BootNNNN entry) or from the USB ESP (via brr-entry chainload).
+// Distinguish by inspecting LoadedImage->FilePath: if any MediaFilePath
+// node contains "\\EFI\\BRR\\" substring, we're the installed copy.
+static int shim_is_installed(EFI_SYSTEM_TABLE *st, EFI_HANDLE image)
+{
+    static const EFI_GUID lip_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    EFI_LOADED_IMAGE_PROTOCOL *li = NULL;
+    EFI_STATUS s = st->BootServices->HandleProtocol(
+        image, (EFI_GUID *)&lip_guid, (void **)&li);
+    if (s != EFI_SUCCESS || !li || !li->FilePath) return 0;
+
+    // Walk device path looking for MediaFilePath nodes (type=4, subtype=4).
+    const UINT8 *p = (const UINT8 *)li->FilePath;
+    for (;;) {
+        UINT8 type = p[0];
+        UINT8 subtype = p[1];
+        UINT16 node_len = (UINT16)p[2] | ((UINT16)p[3] << 8);
+        if (type == 0x7f && subtype == 0xff) break;  // End-of-Entire
+        if (node_len < 4) break;
+        if (type == 4 && subtype == 4) {
+            // MediaFilePath.  Remaining bytes after the 4-byte header
+            // are CHAR16 path, NUL-terminated.
+            const CHAR16 *path = (const CHAR16 *)(p + 4);
+            // Case-insensitive search for "brr" substring.
+            for (UINTN i = 0; path[i]; i++) {
+                if ((path[i] == L'B' || path[i] == L'b') &&
+                    (path[i+1] == L'R' || path[i+1] == L'r') &&
+                    (path[i+2] == L'R' || path[i+2] == L'r'))
+                    return 1;
+            }
+        }
+        p += node_len;
+    }
+    return 0;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 {
     st->ConOut->ClearScreen(st->ConOut);
     efi_print(st, L"BRR mask-shim v1\r\n");
     efi_print(st, L"=====================================\r\n");
+
+    int installed = shim_is_installed(st, image);
+    if (installed) {
+        efi_print(st, L"[shim] running from internal ESP (installed mode)\r\n");
+    } else {
+        efi_print(st, L"[shim] running from USB (trial mode)\r\n");
+    }
 
     // Check load options for --no-mask / --passthrough flag.
     // grub passes the chainloader argument as LoadOptions (UTF-16).
@@ -1851,6 +1895,35 @@ page_mode:
         }
     }
 
+    // Installed-mode exit path: when loaded by the firmware boot manager
+    // from \EFI\BRR\mask-shim.efi (via the BootNNNN entry installed by
+    // brr-entry), we DON'T try to chainload macOS ourselves.  Apple's
+    // boot.efi lives inside sealed cryptex volumes that aren't visible
+    // through plain SFS; and Apple's Boot0080 entry rejects unsigned
+    // LoadImage callers with EFI_ACCESS_DENIED even under No Security.
+    //
+    // Instead, return EFI_NOT_FOUND and let the firmware boot manager
+    // move to the next entry in BootOrder (Apple's own Boot0080 = macOS).
+    // The firmware's own code path honours Secure Boot correctly, AND
+    // our AllocatePages(EfiReservedMemoryType) reservations persist in
+    // the UEFI memory map all the way through ExitBootServices — macOS
+    // sees the bad pages as Reserved and routes around them.
+    //
+    // This is the entire reason the installed flow works without a
+    // signing chain: we're not IN the chain, we just mark memory first.
+    if (installed) {
+        efi_print(st, L"\r\n");
+        efi_print(st, L"[shim] mask applied.  Returning control to firmware\r\n");
+        efi_print(st, L"[shim] boot manager so it can run Apple's boot.efi\r\n");
+        efi_print(st, L"[shim] (Boot0080) via the standard T2-signed path.\r\n");
+        efi_print(st, L"[shim] The reservations persist in the memory map.\r\n");
+        efi_stall_ms(st, 2500);
+        return EFI_NOT_FOUND;  // tells boot manager: try next BootOrder entry
+    }
+
+    // USB-chainloaded mode: we were invoked by brr-entry.efi, which wants
+    // us to complete the chainload.  Brr-entry doesn't iterate BootOrder.
+    // So here we try to find boot.efi directly, then fall back to Boot####.
     // 3a. Primary: enumerate SFS volumes for boot.efi at known paths.
     EFI_HANDLE boot_device = NULL;
     EFI_DEVICE_PATH_PROTOCOL *boot_path = NULL;
@@ -1861,10 +1934,7 @@ page_mode:
         return chainload_macos(st, image, boot_device, boot_path);
     }
 
-    // 3b. Fallback: try UEFI BootOrder.  Apple firmware registers
-    // internal macOS under a Boot#### entry; if SFS scan missed it
-    // (unusual APFS layout, firmware quirk), the registered device
-    // path is authoritative.
+    // 3b. Fallback: try UEFI BootOrder.
     efi_print(st, L"[shim] primary scan failed, trying BootOrder...\r\n");
     s = try_bootorder_chainload(st, image);
     if (s == EFI_SUCCESS) return s;

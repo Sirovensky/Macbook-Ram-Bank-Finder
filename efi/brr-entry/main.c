@@ -615,17 +615,23 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     efi_stall_ms(st, 1000);
 
     s = chainload_shim(image_handle, st);
-    // If we return here, chainload failed but NVRAM state is committed.
-    // A power-cycle + USB boot will re-run this tool and pick up the
-    // already-saved state (addresses auto-applied without retyping).
+    // If we return here, the USB-mode chainload failed.  That's fine
+    // when the shim is already installed on the internal ESP — the
+    // firmware BootOrder will run it on the next boot and macOS will
+    // come up masked via Apple's own boot chain.
     efi_print(st, L"\r\n");
-    efi_print(st, L"  Could not chainload mask-shim (status=");
+    efi_print(st, L"  USB-mode chainload returned status=");
     efi_print_hex(st, (UINT64)s);
-    efi_print(st, L").\r\n");
-    efi_print(st, L"  The mask state is already saved.  Rebooting in 10 s --\r\n");
-    efi_print(st, L"  at the grub menu pick entry 3 again to retry, or just\r\n");
-    efi_print(st, L"  power off; the next boot from USB will pick up the mask.\r\n");
-    efi_stall_ms(st, 10000);
+    efi_print(st, L".\r\n");
+    efi_print(st, L"\r\n");
+    efi_print(st, L"  NVRAM saved.  Shim is installed on the internal ESP.\r\n");
+    efi_print(st, L"  Unplug USB, power off, power on:\r\n");
+    efi_print(st, L"  firmware runs the installed shim from BootOrder,\r\n");
+    efi_print(st, L"  which applies the mask and hands control to\r\n");
+    efi_print(st, L"  Apple's own boot.efi.  macOS boots masked.\r\n");
+    efi_print(st, L"\r\n");
+    efi_print(st, L"  Rebooting in 15 s.\r\n");
+    efi_stall_ms(st, 15000);
 
     st->RuntimeServices->ResetSystem(EFI_RESET_WARM, EFI_SUCCESS, 0, NULL);
     for (;;) { __asm__ __volatile__("hlt"); }
