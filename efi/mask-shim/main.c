@@ -791,9 +791,20 @@ static unsigned list_child_dirs(EFI_FILE_PROTOCOL *dir,
         UINT64 attrs = *(UINT64 *)(dirent_buf + FILEINFO_ATTR_OFFS);
         CHAR16 *fname = (CHAR16 *)(dirent_buf + FILEINFO_FNAME_OFFS);
 
-        if (!(attrs & 0x10 /* EFI_FILE_DIRECTORY */)) continue;
+        // Skip "." / ".." always.
         if (fname[0] == L'.' && fname[1] == 0) continue;
         if (fname[0] == L'.' && fname[1] == L'.' && fname[2] == 0) continue;
+        // Skip empty names (defensive).
+        if (fname[0] == 0) continue;
+
+        // Prefer directories, but if the firmware doesn't set the DIR
+        // bit correctly (observed on some T2 APFS drivers) fall back to
+        // accepting every entry — we'll validate by trying to Open the
+        // full path, which will just fail for non-dirs.
+        if (!(attrs & 0x10 /* EFI_FILE_DIRECTORY */)) {
+            // Accept anyway.  Worst case: extra Open() attempts on
+            // regular files, each returns EFI_NOT_FOUND cheaply.
+        }
 
         // Copy into slot[n].
         CHAR16 *slot = out_names + (UINTN)n * MAX_DIRNAME_CHARS;
@@ -872,17 +883,23 @@ static EFI_STATUS try_open_candidates(EFI_SYSTEM_TABLE *st,
         if (s == EFI_SUCCESS) return s;
     }
 
-    // Tier 2: snapshot 1-level dirs, then probe each.
+    // Tier 2: snapshot 1-level dirs, then probe each with every alt suffix.
     static CHAR16 level1_names[MAX_LEVEL_DIRS * MAX_DIRNAME_CHARS];
     unsigned n1 = list_child_dirs(root, level1_names);
 
     for (unsigned i = 0; i < n1; i++) {
         CHAR16 *name = level1_names + (UINTN)i * MAX_DIRNAME_CHARS;
 
-        path_join(full_path, sizeof(full_path) / sizeof(full_path[0]),
-                  L"\\", name, MACOS_BOOT_SUFFIX);
-        s = try_path(st, device, root, full_path, out_path);
-        if (s == EFI_SUCCESS) return s;
+        // Try <dir>\<each-alt-path>.  The first alt is the standard
+        // Preboot suffix \System\Library\CoreServices\boot.efi, which
+        // catches APFS UUID-prefix layout.  The others cover recovery
+        // and firmware-staging layouts inside UUID subdirs.
+        for (unsigned ai = 0; MACOS_ALT_PATHS[ai]; ai++) {
+            path_join(full_path, sizeof(full_path) / sizeof(full_path[0]),
+                      L"\\", name, MACOS_ALT_PATHS[ai]);
+            s = try_path(st, device, root, full_path, out_path);
+            if (s == EFI_SUCCESS) return s;
+        }
 
         // Tier 3: open <name> and snapshot its children, then probe.
         CHAR16 dir_only[128];
