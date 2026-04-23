@@ -215,12 +215,28 @@ static unsigned read_nvram_badpages(EFI_SYSTEM_TABLE *st,
     UINTN blob_sz = sizeof(blob);
     UINT32 attrs  = 0;
 
+    static const EFI_GUID APPLE_GUID_READ = {
+        0x7c436110, 0xab2a, 0x4bbb,
+        { 0xa8, 0x80, 0xfe, 0x41, 0x99, 0x5c, 0x9f, 0x82 }
+    };
+
     EFI_STATUS s = st->RuntimeServices->GetVariable(
         (CHAR16 *)VARNAME_BADPAGES, (EFI_GUID *)&BRR_GUID,
         &attrs, &blob_sz, blob);
 
     if (s != EFI_SUCCESS) {
-        // Fallback: try legacy A1990BadPages name.
+        // Apple-GUID fallback: T2 commits Apple-vendor-GUID NVRAM
+        // writes across graceful shutdown even when it silently drops
+        // writes to custom GUIDs.  memtest dual-writes.
+        blob_sz = sizeof(blob);
+        attrs   = 0;
+        s = st->RuntimeServices->GetVariable(
+            (CHAR16 *)VARNAME_BADPAGES, (EFI_GUID *)&APPLE_GUID_READ,
+            &attrs, &blob_sz, blob);
+    }
+
+    if (s != EFI_SUCCESS) {
+        // Legacy A1990BadPages name under BRR_GUID.
         blob_sz = sizeof(blob);
         attrs   = 0;
         s = st->RuntimeServices->GetVariable(
@@ -623,12 +639,26 @@ static unsigned read_nvram_badrows(EFI_SYSTEM_TABLE *st,
     UINTN blob_sz = sizeof(blob);
     UINT32 attrs  = 0;
 
+    static const EFI_GUID APPLE_GUID_READ2 = {
+        0x7c436110, 0xab2a, 0x4bbb,
+        { 0xa8, 0x80, 0xfe, 0x41, 0x99, 0x5c, 0x9f, 0x82 }
+    };
+
     EFI_STATUS s = st->RuntimeServices->GetVariable(
         (CHAR16 *)VARNAME_BADROWS, (EFI_GUID *)&BRR_GUID,
         &attrs, &blob_sz, blob);
 
     if (s != EFI_SUCCESS) {
-        // Fallback: try legacy A1990BadRows name.
+        // Apple-GUID fallback.
+        blob_sz = sizeof(blob);
+        attrs   = 0;
+        s = st->RuntimeServices->GetVariable(
+            (CHAR16 *)VARNAME_BADROWS, (EFI_GUID *)&APPLE_GUID_READ2,
+            &attrs, &blob_sz, blob);
+    }
+
+    if (s != EFI_SUCCESS) {
+        // Legacy A1990BadRows under BRR_GUID.
         blob_sz = sizeof(blob);
         attrs   = 0;
         s = st->RuntimeServices->GetVariable(

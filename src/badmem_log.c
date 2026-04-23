@@ -369,6 +369,18 @@ void badmem_log_flush_nvram(void)
         blob_size,
         blob);
 
+    // Dual-write under Apple-GUID so T2 commits the blob even when
+    // custom-GUID writes silently drop on graceful shutdown.
+    efi_status_t status_apple = set_var(
+        (efi_char16_t *)BRR_VARNAME_BADPAGES,
+        (efi_guid_t *)&APPLE_GUID,
+        EFI_VAR_NV_BS_RT,
+        blob_size,
+        blob);
+    display_scrolled_message(0, "[nvram] apple-GUID BadPages setv status=%x",
+                              (uintptr_t)status_apple);
+    scroll();
+
     if (status == EFI_SUCCESS) {
         display_scrolled_message(0, "[nvram] saved %u bad page(s) to NVRAM", n);
         scroll();
@@ -417,6 +429,13 @@ void badmem_log_flush_nvram(void)
         efi_status_t sc = set_var(
             (efi_char16_t *)BRR_VARNAME_BADCHIPS,
             (efi_guid_t *)&BRR_GUID,
+            EFI_VAR_NV_BS_RT,
+            (uintn_t)chip_buf_used, chip_buf);
+
+        // Dual-write under Apple-GUID.
+        set_var(
+            (efi_char16_t *)BRR_VARNAME_BADCHIPS,
+            (efi_guid_t *)&APPLE_GUID,
             EFI_VAR_NV_BS_RT,
             (uintn_t)chip_buf_used, chip_buf);
 
@@ -619,6 +638,13 @@ void badmem_log_flush_rows_nvram(void)
     efi_status_t s = set_var(
         (efi_char16_t *)BRR_VARNAME_BADROWS,
         (efi_guid_t *)&BRR_GUID,
+        EFI_VAR_NV_BS_RT,
+        blob_size, blob);
+
+    // Dual-write under Apple-GUID for T2 persistence.
+    set_var(
+        (efi_char16_t *)BRR_VARNAME_BADROWS,
+        (efi_guid_t *)&APPLE_GUID,
         EFI_VAR_NV_BS_RT,
         blob_size, blob);
 
