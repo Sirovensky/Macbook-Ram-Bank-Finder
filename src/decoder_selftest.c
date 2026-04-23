@@ -3,6 +3,15 @@
 // Decoder self-test harness — validates DRAMDig-prior bank/row XOR masks via
 // bank-conflict / row-hit timing probes executed during EFI boot services.
 //
+// Status (2026-04): CURRENTLY UNWIRED.  The previous call site
+// (src/efi_menu.c, Phase A fresh-boot branch) was removed when efi_menu.c
+// was trimmed to a minimal cmdline parser.  The code still compiles and
+// links (apply.sh adds board/decoder_selftest.o to SYS_OBJS) so it's
+// available to re-wire; just call decoder_selftest_run(sys_table) from
+// wherever UEFI Boot Services are alive.  Output is written to NVRAM
+// "BrrDecoderStatus" and consumed by mask-shim's row/chip-mode dispatch.
+// Row-mode masking is the expected re-enablement path.
+//
 // Algorithm overview:
 //   1. Allocate a 4 MiB physically-contiguous buffer via AllocatePages.
 //   2. Find three PA pairs from within that buffer:
