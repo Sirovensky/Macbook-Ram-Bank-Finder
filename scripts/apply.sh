@@ -209,5 +209,10 @@ apply_patch 0018-reboot-t2-hardened.patch "BRR: SHUTDOWN-only reboot" "system/x8
 # main() runs.  Copy bp->brr_flags (UEFI-pool mem, not in BSS, still
 # pristine here) into the BSS cache as the first act of global_init.
 apply_patch 0019-brr-flags-recache.patch "BRR: re-cache brr_flags post-BSS-zero" "app/main.c"
+# Pre-EBS log dump: con_puts output in efi_menu is invisible on A1990
+# (grub leaves console in graphics mode, UEFI text output is write-to-
+# void).  Mirror every con_puts to a .data buffer, dump it after
+# display_init so user sees diagnostic on memtest's blue framebuffer.
+apply_patch 0020-preboot-log-dump.patch "BRR: dump the pre-ExitBootServices diagnostic log" "app/main.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"

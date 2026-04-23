@@ -35,6 +35,10 @@
 #include "efi_menu.h"
 #include "decoder_selftest.h"
 
+// For post-EBS log dump from main.c:
+#include "display.h"
+extern void scroll(void);
+
 // ---------------------------------------------------------------------------
 // efi_boot_services_t in efi.h declares stall as `void *` (since the caller
 // only uses it via efi_call_bs macro which is not available here).  Cast it
@@ -139,6 +143,24 @@ typedef struct efi_brr_sfs_t {
 efi_brr_file_t *g_brr_fs_root = (efi_brr_file_t *)(uintptr_t)1;
 #define BRR_FS_ROOT_VALID(p) ((p) != 0 && (p) != (efi_brr_file_t *)(uintptr_t)1)
 
+// Pre-ExitBootServices log buffer.  Every con_puts() in efi_menu
+// mirrors into this buffer.  After memtest's screen_init, main.c
+// dumps the buffer to the blue framebuffer via display_scrolled_message
+// so the user can actually see pre-EBS diagnostics -- on this hardware,
+// UEFI ConOut text output never reaches the display (grub leaves the
+// console in graphics mode, EFI text console goes to the void).
+//
+// Must be .data, not .bss, or startup64.S zeros it between
+// efi_menu(pre-EBS) and main()(post-EBS).  Non-zero first byte +
+// explicit section attribute force .data placement.
+struct brr_preboot_log {
+    unsigned len;
+    unsigned magic;
+    char     buf[8192];
+};
+__attribute__((section(".data")))
+struct brr_preboot_log g_brr_preboot = { 0, 0xB007B007u, { ' ' } };
+
 // Write narrow ASCII content to a file at the USB ESP root.  Returns 0
 // on success, EFI status on failure (use print_string to log since
 // ConOut may not be usable post-EBS).  Called from badmem_log.c at
@@ -198,11 +220,19 @@ static void con_out_str(const efi_char16_t *str)
 }
 
 // Output a narrow ASCII string one character at a time via ConOut.
+// Also mirror to g_brr_preboot so memtest's post-EBS main() can dump
+// the same text to its visible blue framebuffer (UEFI ConOut is
+// effectively write-to-void on A1990 + grub graphics-mode console).
 static void con_puts(const char *s)
 {
     efi_char16_t buf[2];
     buf[1] = 0;
     for (; *s; s++) {
+        // Mirror to buffer (guarded for size).
+        if (g_brr_preboot.len < sizeof(g_brr_preboot.buf) - 1) {
+            g_brr_preboot.buf[g_brr_preboot.len++] = *s;
+            g_brr_preboot.buf[g_brr_preboot.len] = 0;
+        }
         if (*s == '\n') {
             buf[0] = '\r';
             g_con_out->output_string(g_con_out, buf);
@@ -986,4 +1016,37 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
     // Timeout -- treat as Enter.
     con_puts("\r\n  -> Timeout: running all tests\r\n\r\n");
     return 0;
+}
+
+// BRR: dump the pre-EBS con_puts mirror buffer to memtest's blue
+// framebuffer so the user can see diagnostic output that never
+// reached UEFI ConOut (grub-graphics-mode console is write-to-void
+// on A1990).  Called from main.c::global_init after screen_init.
+void brr_preboot_log_dump(void)
+{
+    if (g_brr_preboot.magic != 0xB007B007u) return;  // uninitialized
+    if (g_brr_preboot.len == 0) return;
+
+    display_scrolled_message(0, "=== pre-EBS diagnostic log (%u bytes) ===",
+                              (uintptr_t)g_brr_preboot.len);
+    scroll();
+
+    char line[128];
+    unsigned i = 0;
+    while (i < g_brr_preboot.len) {
+        unsigned j = 0;
+        while (i < g_brr_preboot.len && j < sizeof(line) - 1) {
+            char c = g_brr_preboot.buf[i++];
+            if (c == '\r') continue;
+            if (c == '\n') break;
+            line[j++] = c;
+        }
+        line[j] = 0;
+        if (j > 0) {
+            display_scrolled_message(0, "%s", (uintptr_t)(uintptr_t)line);
+            scroll();
+        }
+    }
+    display_scrolled_message(0, "=== end pre-EBS log ===");
+    scroll();
 }

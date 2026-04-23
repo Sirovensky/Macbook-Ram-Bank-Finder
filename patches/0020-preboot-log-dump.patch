@@ -1,0 +1,24 @@
+--- a/app/main.c
++++ b/app/main.c
+@@ -273,6 +273,22 @@ static void global_init(void)
+     display_init();
+
++    // BRR: dump the pre-ExitBootServices diagnostic log into memtest's
++    // framebuffer so the user can see the SFS handle scan, file probe
++    // results, etc.  UEFI ConOut text output doesn't render on A1990
++    // once grub has put the display in graphics mode.
++    extern void brr_preboot_log_dump(void);
++    brr_preboot_log_dump();
++
++    // Pause long enough to read the log before board info + tests
++    // scroll it away.
++    for (int s = 10; s > 0; s--) {
++        extern void scroll(void);
++        display_scrolled_message(0, "[boot] continuing in %2i s ...", (uintptr_t)s);
++        scroll();
++        usleep(1000000);
++    }
++
+     error_init();
+
+     /* Dump IMC config + board detection to message area once at startup. */
