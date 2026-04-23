@@ -20,24 +20,11 @@ void badmem_log_record(uint64_t phys_addr);
 // Idempotent — safe to call more than once.
 void badmem_log_dump(void);
 
-// Write all accumulated bad page addresses to NVRAM as the binary variable
-// "BrrBadPages" under the BRR vendor GUID.
-// Format: uint32_t version=1, uint32_t count, then count * uint64_t PAs.
-// Capped at 4096 entries (32 KiB blob) to stay within NVRAM limits.
-// No-op if UEFI Runtime Services are unavailable (BIOS boot, or RT not found).
-// Logs "[nvram] saved N pages" or a failure note to the scroll area.
-// Safe to call repeatedly; each call overwrites the previous value.
-// After flushing pages, sets BrrMaskState to TRIAL_PENDING_PAGE or
-// TRIAL_PENDING_CHIP depending on the BRR_FLAG_AUTO_TRIAL_CHIP bit in
-// boot_params->brr_flags.
-void badmem_log_flush_nvram(void);
-
 // Record a chip designator (e.g. "U2620") identified during a test run.
-// Internally maintained as a NUL-separated list (max 256 bytes total,
-// including all NUL separators).  Duplicate designators are silently dropped.
-// Called from error_hook.c::board_report_error() when a chip is resolved.
-// The accumulated list is written to NVRAM as BrrBadChips during
-// badmem_log_flush_nvram() when chip-mode is active.
+// Kept for chip-level diagnostics; called from error_hook.c when a chip
+// is resolved.  NVRAM persistence of this list was removed (post-EBS
+// SetVariable does not persist on Apple T2; brr-entry.efi handles
+// persistence pre-EBS on a per-page basis).
 void badmem_log_record_chip(const char *designator);
 
 // Record a bad (channel, rank, bank_group, bank, row) tuple.
@@ -45,15 +32,6 @@ void badmem_log_record_chip(const char *designator);
 // Called from error_hook.c when pa.bank_row_valid is true.
 void badmem_log_record_row(uint8_t channel, uint8_t rank,
                             uint8_t bg, uint8_t bank, uint32_t row);
-
-// Flush accumulated bad rows to NVRAM as "BrrBadRows".
-// Call from the end-of-pass hook after badmem_log_flush_nvram().
-// Binary format: [uint32_t version=1][uint32_t count]
-//   followed by count tuples of:
-//     uint8_t ch + uint8_t rank + uint8_t bg + uint8_t bank + uint32_t row
-//   = 8 bytes per tuple.  Cap 256 rows = 2 KiB blob.
-// No-op if UEFI Runtime Services are unavailable.
-void badmem_log_flush_rows_nvram(void);
 
 // ---------------------------------------------------------------------------
 // Skip-list (fail-safe against hardware wedge).

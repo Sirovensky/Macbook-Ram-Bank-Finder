@@ -189,9 +189,14 @@ static EFI_STATUS write_bad_pages(EFI_SYSTEM_TABLE *st, UINT64 *pas, unsigned n)
 }
 
 // ---------------------------------------------------------------------------
-// Chainload \EFI\BOOT\mask-shim.efi from the same USB we were loaded from.
-// Builds a hardware-prefix device path (required by Apple T2 firmware, bare
-// MediaFilePath is silently rejected).
+// Chainload mask-shim.efi.  Iterate all handles that support
+// SimpleFileSystem; for each, try to open \EFI\BOOT\mask-shim.efi.
+// The handle where the file exists is the USB ESP we want to LoadImage
+// from -- build a hardware-prefix + FilePath device path against that
+// handle, then LoadImage.  This matches the pattern mask-shim itself
+// uses (successfully) to chainload macOS's boot.efi, and avoids the
+// Apple-T2 failure mode where a device path built from LoadedImage
+// ->DeviceHandle resolves to an ISO9660 view instead of the FAT ESP.
 // ---------------------------------------------------------------------------
 static EFI_STATUS chainload_shim(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 {
@@ -203,35 +208,71 @@ static EFI_STATUS chainload_shim(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
         0x09576e91, 0x6d3f, 0x11d2,
         { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
     };
+    static const EFI_GUID SFS_GUID_L = {
+        0x0964e5b22, 0x6459, 0x11d2,
+        { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
+    };
+    static const CHAR16 SHIM_PATH[] = L"\\EFI\\BOOT\\mask-shim.efi";
+    UINTN path_chars = 0;
+    while (SHIM_PATH[path_chars]) path_chars++;
+    path_chars++;  // include trailing NUL
 
-    EFI_LOADED_IMAGE_PROTOCOL *li = NULL;
-    EFI_STATUS s = st->BootServices->HandleProtocol(
-        image_handle, (EFI_GUID *)&LOADED_IMAGE_GUID_L, (void **)&li);
-    if (s != EFI_SUCCESS || !li) return s;
+    // Enumerate all SimpleFileSystem handles.
+    UINTN handles_sz = 0;
+    EFI_STATUS s = st->BootServices->LocateHandle(
+        EFI_LOCATE_BY_PROTOCOL, (EFI_GUID *)&SFS_GUID_L, NULL, &handles_sz, NULL);
+    if (s != EFI_BUFFER_TOO_SMALL && s != EFI_SUCCESS) return s;
 
-    UINT8 *hw_dp = NULL;
-    UINTN prefix_len = 0;
-    if (li->DeviceHandle) {
-        s = st->BootServices->HandleProtocol(
-            li->DeviceHandle, (EFI_GUID *)&DEVICE_PATH_GUID_L, (void **)&hw_dp);
-        if (s == EFI_SUCCESS && hw_dp) {
-            // Walk to end node, total length minus end node (4 bytes).
-            UINT8 *p = hw_dp;
-            for (;;) {
-                UINT16 node_len = (UINT16)p[2] | ((UINT16)p[3] << 8);
-                if (p[0] == 0x7f && p[1] == 0xff) break;
-                p += node_len;
-            }
-            prefix_len = (UINTN)(p - hw_dp);
-        } else {
-            hw_dp = NULL;
+    EFI_HANDLE *handles = NULL;
+    s = st->BootServices->AllocatePool(EfiLoaderData, handles_sz, (void **)&handles);
+    if (s != EFI_SUCCESS) return s;
+    s = st->BootServices->LocateHandle(
+        EFI_LOCATE_BY_PROTOCOL, (EFI_GUID *)&SFS_GUID_L, NULL, &handles_sz, handles);
+    if (s != EFI_SUCCESS) {
+        st->BootServices->FreePool(handles);
+        return s;
+    }
+    UINTN nh = handles_sz / sizeof(EFI_HANDLE);
+
+    // Find the handle whose root contains \EFI\BOOT\mask-shim.efi.
+    EFI_HANDLE device = NULL;
+    for (UINTN i = 0; i < nh; i++) {
+        EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = NULL;
+        if (st->BootServices->HandleProtocol(
+                handles[i], (EFI_GUID *)&SFS_GUID_L, (void **)&sfs) != EFI_SUCCESS)
+            continue;
+        EFI_FILE_PROTOCOL *root = NULL;
+        if (sfs->OpenVolume(sfs, &root) != EFI_SUCCESS) continue;
+        EFI_FILE_PROTOCOL *f = NULL;
+        EFI_STATUS fs_s = root->Open(root, &f, (CHAR16 *)SHIM_PATH,
+                                      EFI_FILE_MODE_READ, 0);
+        root->Close(root);
+        if (fs_s == EFI_SUCCESS) {
+            f->Close(f);
+            device = handles[i];
+            break;
         }
     }
+    st->BootServices->FreePool(handles);
 
-    static const CHAR16 path[] = L"\\EFI\\BOOT\\mask-shim.efi";
-    UINTN path_chars = 0;
-    while (path[path_chars]) path_chars++;
-    path_chars++;  // include trailing NUL
+    if (!device) return EFI_NOT_FOUND;
+
+    // Build hardware-prefix + FilePath device path against `device`.
+    UINT8 *hw_dp = NULL;
+    UINTN prefix_len = 0;
+    s = st->BootServices->HandleProtocol(
+        device, (EFI_GUID *)&DEVICE_PATH_GUID_L, (void **)&hw_dp);
+    if (s == EFI_SUCCESS && hw_dp) {
+        UINT8 *p = hw_dp;
+        for (;;) {
+            UINT16 node_len = (UINT16)p[2] | ((UINT16)p[3] << 8);
+            if (p[0] == 0x7f && p[1] == 0xff) break;
+            p += node_len;
+        }
+        prefix_len = (UINTN)(p - hw_dp);
+    } else {
+        hw_dp = NULL;
+    }
 
     UINTN fp_sz = 4 + path_chars * sizeof(CHAR16);
     UINTN total_sz = prefix_len + fp_sz + 4;
@@ -248,7 +289,7 @@ static EFI_STATUS chainload_shim(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     dp[2] = (UINT8)(fp_sz & 0xff);
     dp[3] = (UINT8)(fp_sz >> 8);
     for (UINTN i = 0; i < path_chars; i++) {
-        CHAR16 c = path[i];
+        CHAR16 c = SHIM_PATH[i];
         dp[4 + i * 2]     = (UINT8)(c & 0xFF);
         dp[4 + i * 2 + 1] = (UINT8)((c >> 8) & 0xFF);
     }
@@ -261,6 +302,7 @@ static EFI_STATUS chainload_shim(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (s != EFI_SUCCESS) return s;
 
     return st->BootServices->StartImage(new_image, NULL, NULL);
+    (void)LOADED_IMAGE_GUID_L;  // silence unused -- kept for future extensions
 }
 
 // ---------------------------------------------------------------------------
@@ -302,20 +344,19 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (st->ConIn && st->ConIn->Reset)
         st->ConIn->Reset(st->ConIn, 0);
 
-    efi_print(st, L"=====================================================\r\n");
-    efi_print(st, L"  BRR bad-address entry tool\r\n");
-    efi_print(st, L"=====================================================\r\n");
+    efi_print(st, L"==========================================================\r\n");
+    efi_print(st, L"   BRR -- step 2 of 2: enter bad addresses, apply mask\r\n");
+    efi_print(st, L"==========================================================\r\n");
     efi_print(st, L"\r\n");
-    efi_print(st, L"Type the bad addresses memtest reported.\r\n");
-    efi_print(st, L"Format: hex, comma-separated.  0x prefix optional.\r\n");
-    efi_print(st, L"Example:  0xb2100000, 0xb2200000, 0xb2300000\r\n");
+    efi_print(st, L" From the memtest screen you photographed, type the\r\n");
+    efi_print(st, L" addresses here.  Comma-separated hex.  0x prefix OK.\r\n");
     efi_print(st, L"\r\n");
-    efi_print(st, L"Each entry gets +/-1 MiB padding applied automatically\r\n");
-    efi_print(st, L"by mask-shim when the mask is built.\r\n");
+    efi_print(st, L"   example:  0xb2100000, 0xb2200000\r\n");
     efi_print(st, L"\r\n");
-    efi_print(st, L"ESC cancels.  Enter submits.  Backspace deletes.\r\n");
+    efi_print(st, L" Each address gets +/-1 MiB padding automatically.\r\n");
+    efi_print(st, L" Keys: Enter = submit,  Backspace = delete,  ESC = cancel.\r\n");
     efi_print(st, L"\r\n");
-    efi_print(st, L"addresses> ");
+    efi_print(st, L" addresses> ");
 
     static CHAR16 line[512];
     unsigned n = read_line(st, line, sizeof(line) / sizeof(line[0]));
@@ -352,7 +393,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     }
 
     // Confirm.
-    efi_print(st, L"Press [Y] to write NVRAM + chainload mask-shim, any other key = cancel\r\n");
+    efi_print(st, L" Press [Y] to save + reboot into macOS with mask,\r\n");
+    efi_print(st, L" any other key = cancel\r\n\r\n");
     for (;;) {
         CHAR16 k = efi_readkey(st);
         if (k == L'Y' || k == L'y') { efi_newline(st); break; }
@@ -404,17 +446,25 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     }
     efi_print(st, L"OK\r\n");
 
-    // Chainload mask-shim, which applies the mask and chainloads macOS.
-    efi_print(st, L"\r\n[brr-entry] Chainloading mask-shim.efi ...\r\n");
-    efi_stall_ms(st, 1500);
-    s = chainload_shim(image_handle, st);
-    // If we return, chainload failed.
-    efi_print(st, L"[brr-entry] Chainload returned status=");
-    efi_print_hex(st, (UINT64)s);
     efi_print(st, L"\r\n");
-    efi_print(st, L"  NVRAM state is written -- reboot manually and pick grub\r\n");
-    efi_print(st, L"  entry 'Boot macOS normally (no mask)' -- mask-shim will\r\n");
-    efi_print(st, L"  still run if BootOrder is set up, or use entry for --mask.\r\n");
-    efi_stall_ms(st, 30000);
-    return s;
+    efi_print(st, L" ==========================================================\r\n");
+    efi_print(st, L"   NVRAM hook saved.  Chainloading mask-shim.efi ...\r\n");
+    efi_print(st, L" ==========================================================\r\n");
+    efi_print(st, L"\r\n");
+    efi_stall_ms(st, 1500);
+
+    s = chainload_shim(image_handle, st);
+    // Chainload should not return on success.  If it does, NVRAM state
+    // was still committed so a fresh boot (power cycle) plus USB boot
+    // will still pick up the mask via mask-shim installed on the ESP.
+    efi_print(st, L"\r\n Chainload failed (status=");
+    efi_print_hex(st, (UINT64)s);
+    efi_print(st, L").  Reboot + boot USB again and mask-shim will\r\n");
+    efi_print(st, L" still apply the mask on next pass.\r\n");
+    efi_stall_ms(st, 15000);
+
+    // Warm reboot regardless of chainload outcome -- state is in NVRAM.
+    st->RuntimeServices->ResetSystem(EFI_RESET_WARM, EFI_SUCCESS, 0, NULL);
+    for (;;) { __asm__ __volatile__("hlt"); }
+    return EFI_SUCCESS;
 }

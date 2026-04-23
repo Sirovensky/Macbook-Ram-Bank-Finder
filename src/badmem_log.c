@@ -29,16 +29,6 @@ static const efi_guid_t BRR_GUID = {
     { 0x9d, 0x1e, 0x5f, 0x6a, 0x7b, 0x8c, 0x9d, 0x0e }
 };
 
-// Apple NVRAM vendor GUID {7C436110-AB2A-4BBB-A880-FE41995C9F82}.
-// Apple's T2 commits writes under this GUID reliably (it's the GUID
-// macOS uses for its own NVRAM variables like "boot-args").  We
-// dual-write state vars under BOTH GUIDs at pass end; readers try
-// BRR_GUID first (clean) then APPLE_GUID (fallback that T2 persists).
-static const efi_guid_t APPLE_GUID = {
-    0x7c436110, 0xab2a, 0x4bbb,
-    { 0xa8, 0x80, 0xfe, 0x41, 0x99, 0x5c, 0x9f, 0x82 }
-};
-
 // Variable name for the binary bad-pages array.
 // UTF-16 literal: L"BrrBadPages"
 static const efi_char16_t BRR_VARNAME_BADPAGES[] = {
@@ -94,39 +84,6 @@ typedef efi_status_t (efiapi *get_variable_fn)(
 // EFI variable attribute bits.
 #define EFI_VAR_NV_BS_RT  (0x00000001u | 0x00000002u | 0x00000004u)
 
-// Readback verification: immediately GetVariable after SetVariable and
-// compare size.  If GetVariable returns non-success or size=0, the write
-// was silently rejected (T2 Full Security namespace filter, per-GUID
-// policy, etc.) and the shim will never see the state on next boot.
-// Prints a loud warning so the user knows why the flow is stuck.
-static int verify_readback(efi_runtime_services_t *rt,
-                            const efi_char16_t *name,
-                            const char *label,
-                            uintn_t expected_min_size)
-{
-    if (!rt) return 0;
-    get_variable_fn get_var = (get_variable_fn)(uintptr_t)rt->get_variable;
-    if (!get_var) return 0;
-
-    static uint8_t probe[4096];
-    uintn_t sz = sizeof(probe);
-    uint32_t attrs = 0;
-    efi_status_t gs = get_var((efi_char16_t *)name,
-                              (efi_guid_t *)&BRR_GUID,
-                              &attrs, &sz, probe);
-    if (gs == EFI_SUCCESS && sz >= expected_min_size) {
-        display_scrolled_message(0, "[nvram]   readback %s OK (%u bytes, attrs=%x)",
-                                 (uintptr_t)label, (uintptr_t)sz, (uintptr_t)attrs);
-        scroll();
-        return 1;
-    }
-    display_scrolled_message(0, "[nvram]   READBACK FAILED %s (get_var status=%x sz=%u)",
-                             (uintptr_t)label, (uintptr_t)gs, (uintptr_t)sz);
-    scroll();
-    display_scrolled_message(0, "[nvram]   -> T2 silently rejected write. Lower Secure Boot to No Security.");
-    scroll();
-    return 0;
-}
 
 // ---------------------------------------------------------------------------
 // Binary blob layout written to NVRAM.
@@ -292,334 +249,64 @@ void badmem_log_dump(void)
 {
     display_scrolled_message(0, "");
     scroll();
-    display_scrolled_message(0, "=====================================================");
-    scroll();
-    display_scrolled_message(0, "  BRR bad-address summary  (%u page(s) this pass)", log_count);
-    scroll();
-    display_scrolled_message(0, "=====================================================");
+    display_scrolled_message(0, "  BAD ADDRESSES (%u found) -- photograph this line:",
+                              (uintptr_t)log_count);
     scroll();
 
     if (log_count == 0) {
-        display_scrolled_message(0, "  (no bad pages detected)");
+        display_scrolled_message(0, "    (none detected)");
         scroll();
-    } else {
-        // Format for grub entry 8 address-entry tool (comma-separated hex).
-        display_scrolled_message(0, "  Type these into grub entry 8 (copy-paste):");
-        scroll();
-        display_scrolled_message(0, "");
-        scroll();
-        // Print up to 4 addresses per line, comma-separated.
-        char line[128];
-        unsigned line_len = 0;
-        line[0] = 0;
-        for (unsigned i = 0; i < log_count; i++) {
-            char abuf[24];
-            // Render "0x%x" manually since memtest printf uses its own
-            // format string and we want tight packing on one line.
-            unsigned pos = 0;
-            abuf[pos++] = '0'; abuf[pos++] = 'x';
-            uint64_t v = log_pages[i];
-            int started = 0;
-            for (int shift = 60; shift >= 0; shift -= 4) {
-                unsigned nib = (unsigned)((v >> shift) & 0xFu);
-                if (!started && nib == 0 && shift > 0) continue;
-                started = 1;
-                abuf[pos++] = nib < 10 ? ('0' + nib) : ('a' + nib - 10);
-            }
-            if (!started) abuf[pos++] = '0';
-            abuf[pos] = 0;
-
-            unsigned alen = pos;
-            unsigned comma = (i + 1 < log_count) ? 2u : 0u;  // ", " tail
-            if (line_len + alen + comma > 60) {
-                // Emit and reset.
-                display_scrolled_message(0, "    %s", (uintptr_t)line);
-                scroll();
-                line_len = 0;
-                line[0] = 0;
-            }
-            for (unsigned k = 0; k < alen; k++) line[line_len++] = abuf[k];
-            if (i + 1 < log_count) { line[line_len++] = ','; line[line_len++] = ' '; }
-            line[line_len] = 0;
-        }
-        if (line_len > 0) {
-            display_scrolled_message(0, "    %s", (uintptr_t)line);
-            scroll();
-        }
-    }
-
-    display_scrolled_message(0, "=====================================================");
-    scroll();
-    display_scrolled_message(0, "  Next: power off, boot USB, pick grub entry 8");
-    scroll();
-    display_scrolled_message(0, "  and type the addresses above.  +/-1MiB padding");
-    scroll();
-    display_scrolled_message(0, "  applied automatically by mask-shim.");
-    scroll();
-    display_scrolled_message(0, "=====================================================");
-    scroll();
-}
-
-// ---------------------------------------------------------------------------
-// NVRAM flush — new automatic workflow.
-// ---------------------------------------------------------------------------
-
-// Access the brr_flags stored in boot_params (written by efi_menu before
-// ExitBootServices).  The boot_params_t layout is defined in
-// memtest86plus/boot/bootparams.h and patched by 0006-bootparams-a1990-flags.
-// We forward-declare only the fields we need to avoid a complex include here.
-// boot_params_addr is a uintptr_t exported by the memtest86plus boot shim.
-extern uintptr_t boot_params_addr;
-
-// Offset of brr_flags in boot_params_t (from patch 0006):
-// cmd_line_ptr is at 0x228 (4 bytes), unused6 fills 0x22c-0x238,
-// cmd_line_size at 0x238 (4 bytes), then brr_flags at 0x23c.
-#define BRR_FLAGS_OFFSET  0x23c
-
-// Flag bit for chip-mode trial (must match efi_menu.h BRR_FLAG_AUTO_TRIAL_CHIP).
-#define BRR_FLAG_AUTO_TRIAL_CHIP_BIT  (1u << 3)
-
-void badmem_log_flush_nvram(void)
-{
-    efi_runtime_services_t *rt = hwctrl_get_efi_rt();
-    if (!rt) {
-        // BIOS boot or EFI system table not found: NVRAM path unavailable.
         return;
     }
 
-    // Cap entries at MAX_ENTRIES (already enforced during recording, but
-    // assert defensively since we compute blob size below).
-    unsigned n = log_count;
-    if (n > MAX_ENTRIES)
-        n = MAX_ENTRIES;
-
-    // Build the binary blob in a static buffer.
-    // Header (8 bytes) + n * 8 bytes of PAs = up to 32776 bytes.
-    // 4096 entries × 8 = 32768 + 8 header = 32776 — comfortably under the
-    // 64 KiB per-variable NVRAM limit enforced by typical UEFI firmware.
-    static uint8_t blob[sizeof(badpages_hdr_t) + MAX_ENTRIES * sizeof(uint64_t)];
-    badpages_hdr_t *hdr = (badpages_hdr_t *)blob;
-    hdr->version = 1;
-    hdr->count   = n;
-
-    uint64_t *pa_array = (uint64_t *)(blob + sizeof(badpages_hdr_t));
-    for (unsigned i = 0; i < n; i++) {
-        pa_array[i] = log_pages[i];
-    }
-
-    uintn_t blob_size = sizeof(badpages_hdr_t) + (uintn_t)n * sizeof(uint64_t);
-
-    // Cast the unsigned-long field to the proper function-pointer type.
-    set_variable_fn set_var = (set_variable_fn)(uintptr_t)rt->set_variable;
-
-    efi_status_t status = set_var(
-        (efi_char16_t *)BRR_VARNAME_BADPAGES,
-        (efi_guid_t *)&BRR_GUID,
-        EFI_VAR_NV_BS_RT,
-        blob_size,
-        blob);
-
-    // Dual-write under Apple-GUID so T2 commits the blob even when
-    // custom-GUID writes silently drop on graceful shutdown.
-    efi_status_t status_apple = set_var(
-        (efi_char16_t *)BRR_VARNAME_BADPAGES,
-        (efi_guid_t *)&APPLE_GUID,
-        EFI_VAR_NV_BS_RT,
-        blob_size,
-        blob);
-    display_scrolled_message(0, "[nvram] apple-GUID BadPages setv status=%x",
-                              (uintptr_t)status_apple);
-    scroll();
-
-    if (status == EFI_SUCCESS) {
-        display_scrolled_message(0, "[nvram] saved %u bad page(s) to NVRAM", n);
-        scroll();
-        verify_readback(rt, BRR_VARNAME_BADPAGES, "BrrBadPages",
-                        sizeof(badpages_hdr_t));
-    } else {
-        // SetVariable failed — NVRAM might be read-only (T2 Medium Security,
-        // firmware locked, or BrrBadPages blob exceeded per-variable cap).
-        // Print a non-fatal warning and continue; the screen dump is still
-        // available for the manual workflow AND we still try to write the
-        // chip/row/state variables below (they are smaller and often succeed
-        // when BrrBadPages alone is rejected by per-var size limits).
-        //
-        // NOTE: earlier revisions returned here on the first failure, which
-        // lost BrrBadChips AND left the state machine untouched, causing the
-        // next boot's efi_menu to re-run memtest instead of chainloading
-        // the shim.  Continue through — each subsequent write is independent.
-        display_scrolled_message(0,
-            "[nvram] SetVariable BrrBadPages failed (status %x) -- continuing with smaller vars",
-            (uintptr_t)status);
-        scroll();
-    }
-
-    // ---------------------------------------------------------------------------
-    // Phase B: determine chip-mode flag and conditionally flush BrrBadChips.
-    // ---------------------------------------------------------------------------
-    // Read from efi_menu.c's BSS-stable cache, NOT from
-    // boot_params->brr_flags.  The latter gets clobbered by memory
-    // tests writing over the struct (map_region doesn't remove the
-    // region from pm_map, so tests write garbage on top of the
-    // Linux boot-protocol struct).  Observed corruption: bit 3
-    // spuriously set, triggering chip_mode when user asked for page.
-    extern uint32_t g_brr_flags_cached;
-    uint32_t brr_flags = g_brr_flags_cached;
-
-    int chip_mode = (brr_flags & BRR_FLAG_AUTO_TRIAL_CHIP_BIT) != 0;
-
-    if (chip_mode && chip_buf_used > 0) {
-        // Write BrrBadChips: comma-separated designator list (e.g.
-        // "U2620,U2310").  Include the trailing NUL so the reader can
-        // Write comma-separated list WITHOUT trailing NUL — matches the
-        // no-NUL convention used by mask_nvram_set_ascii / state strings,
-        // and avoids the off-by-one where a full 256-byte payload would
-        // overflow the reader's (bufsz-1)-byte capacity in
-        // mask_nvram_get_ascii.  Reader NUL-terminates at buf[sz].
-        efi_status_t sc = set_var(
-            (efi_char16_t *)BRR_VARNAME_BADCHIPS,
-            (efi_guid_t *)&BRR_GUID,
-            EFI_VAR_NV_BS_RT,
-            (uintn_t)chip_buf_used, chip_buf);
-
-        // Dual-write under Apple-GUID.
-        set_var(
-            (efi_char16_t *)BRR_VARNAME_BADCHIPS,
-            (efi_guid_t *)&APPLE_GUID,
-            EFI_VAR_NV_BS_RT,
-            (uintn_t)chip_buf_used, chip_buf);
-
-        if (sc == EFI_SUCCESS) {
-            display_scrolled_message(0, "[nvram] saved BrrBadChips (%u byte(s))",
-                                     chip_buf_used);
-            scroll();
-        } else {
-            display_scrolled_message(0,
-                "[nvram] WARNING: could not save BrrBadChips (status %x)",
-                (uintptr_t)sc);
-            scroll();
+    // Print up to ~60 chars per line, comma-separated hex.
+    char line[128];
+    unsigned line_len = 0;
+    line[0] = 0;
+    for (unsigned i = 0; i < log_count; i++) {
+        char abuf[24];
+        unsigned pos = 0;
+        abuf[pos++] = '0'; abuf[pos++] = 'x';
+        uint64_t v = log_pages[i];
+        int started = 0;
+        for (int shift = 60; shift >= 0; shift -= 4) {
+            unsigned nib = (unsigned)((v >> shift) & 0xFu);
+            if (!started && nib == 0 && shift > 0) continue;
+            started = 1;
+            abuf[pos++] = nib < 10 ? ('0' + nib) : ('a' + nib - 10);
         }
-    }
+        if (!started) abuf[pos++] = '0';
+        abuf[pos] = 0;
 
-    // ---------------------------------------------------------------------------
-    // Phase C: set BrrMaskState to TRIAL_PENDING_PAGE or TRIAL_PENDING_CHIP.
-    // This tells mask-shim on the next USB boot which mask to apply.
-    // ---------------------------------------------------------------------------
-    const char *new_state = chip_mode ? STATE_TRIAL_PENDING_CHIP
-                                      : STATE_TRIAL_PENDING_PAGE;
-
-    // Compute length of new_state string.
-    uintn_t state_len = 0;
-    while (new_state[state_len]) state_len++;
-
-    efi_status_t ss = set_var(
-        (efi_char16_t *)BRR_VARNAME_STATE,
-        (efi_guid_t *)&BRR_GUID,
-        EFI_VAR_NV_BS_RT,
-        state_len, (void *)new_state);
-
-    // Dual-write under Apple NVRAM GUID — T2 commits Apple vars
-    // reliably even when it filters writes to custom GUIDs.
-    efi_status_t ss_apple = set_var(
-        (efi_char16_t *)BRR_VARNAME_STATE,
-        (efi_guid_t *)&APPLE_GUID,
-        EFI_VAR_NV_BS_RT,
-        state_len, (void *)new_state);
-    display_scrolled_message(0, "[nvram] apple-GUID state setv status=%x",
-                              (uintptr_t)ss_apple);
-    scroll();
-
-    if (ss == EFI_SUCCESS) {
-        display_scrolled_message(0, "[nvram] state -> %s", new_state);
-        scroll();
-        verify_readback(rt, BRR_VARNAME_STATE, "BrrMaskState", state_len);
-    } else {
-        display_scrolled_message(0, "[nvram] WARNING: could not set BrrMaskState (status %x)",
-                                 (uintptr_t)ss);
-        scroll();
-    }
-
-    // Delete legacy A1990* variables to complete migration (best-effort).
-    //
-    // NOTE — T2 firmware requires NV|BS|RT attributes even for a delete
-    // (size=0) call; attrs=0 is rejected with EFI_INVALID_PARAMETER and
-    // the variable stays on disk as cruft.  This was originally fixed
-    // in mask-shim / mask-install but the memtest-side legacy cleanup
-    // still passed attrs=0 and therefore silently did nothing on T2.
-    set_var((efi_char16_t *)LEGACY_VARNAME_BADPAGES,
-            (efi_guid_t *)&BRR_GUID, EFI_VAR_NV_BS_RT, 0, 0);
-    set_var((efi_char16_t *)LEGACY_VARNAME_BADCHIPS,
-            (efi_guid_t *)&BRR_GUID, EFI_VAR_NV_BS_RT, 0, 0);
-    set_var((efi_char16_t *)LEGACY_VARNAME_STATE,
-            (efi_guid_t *)&BRR_GUID, EFI_VAR_NV_BS_RT, 0, 0);
-
-    // BRR: also write a plain-text state file on the USB ESP.  Uses
-    // the Simple File System protocol handle captured pre-EBS by
-    // efi_menu.c.  Success depends on T2 firmware preserving the
-    // function pointers across ExitBootServices; if not, the call
-    // silently returns a non-zero error (worst case: faults and we
-    // halt on the next line, which is also acceptable at this point).
-    extern int brr_fs_write_file(const efi_char16_t *, unsigned,
-                                  const char *, unsigned);
-    // Paths under \EFI\BRR\ — dedicated subdirectory nothing else
-    // (grub, memtest, mask-shim binaries) touches, so we won't be
-    // overwritten.  Created by efi_menu on every boot (idempotent).
-    static const efi_char16_t path_state[] = {
-        '\\','E','F','I','\\','B','R','R','\\','s','t','a','t','e','.','t','x','t', 0
-    };
-    static const efi_char16_t path_pages[] = {
-        '\\','E','F','I','\\','B','R','R','\\','p','a','g','e','s','.','t','x','t', 0
-    };
-
-    // State file: single-line state string + newline.
-    char state_buf[64];
-    uintn_t sb = 0;
-    for (const char *p = new_state; *p && sb < sizeof(state_buf) - 2; p++)
-        state_buf[sb++] = *p;
-    state_buf[sb++] = '\n';
-    state_buf[sb] = 0;
-    int rc_s = brr_fs_write_file(path_state,
-        sizeof(path_state) / sizeof(efi_char16_t),
-        state_buf, (unsigned)sb);
-    display_scrolled_message(0, "[file] brr-state.txt write rc=%i", (uintptr_t)rc_s);
-    scroll();
-
-    // Pages file: "pa=0xADDR\n" per bad page.
-    static char pages_buf[4096];
-    uintn_t pb = 0;
-    for (unsigned i = 0; i < n && pb + 32 < sizeof(pages_buf); i++) {
-        const char *prefix = "pa=0x";
-        for (const char *p = prefix; *p; p++) pages_buf[pb++] = *p;
-        uint64_t pa = log_pages[i];
-        for (int nib = 15; nib >= 0; nib--) {
-            uint8_t x = (pa >> (nib * 4)) & 0xf;
-            pages_buf[pb++] = x < 10 ? ('0' + x) : ('a' + x - 10);
+        unsigned alen = pos;
+        unsigned comma = (i + 1 < log_count) ? 2u : 0u;
+        if (line_len + alen + comma > 60) {
+            display_scrolled_message(0, "    %s", (uintptr_t)line);
+            scroll();
+            line_len = 0;
+            line[0] = 0;
         }
-        pages_buf[pb++] = '\n';
+        for (unsigned k = 0; k < alen; k++) line[line_len++] = abuf[k];
+        if (i + 1 < log_count) { line[line_len++] = ','; line[line_len++] = ' '; }
+        line[line_len] = 0;
     }
-    pages_buf[pb] = 0;
-    int rc_p = brr_fs_write_file(path_pages,
-        sizeof(path_pages) / sizeof(efi_char16_t),
-        pages_buf, (unsigned)pb);
-    display_scrolled_message(0, "[file] brr-pages.txt write rc=%i (%u bytes)",
-                              (uintptr_t)rc_p, (uintptr_t)pb);
-    scroll();
+    if (line_len > 0) {
+        display_scrolled_message(0, "    %s", (uintptr_t)line);
+        scroll();
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Row accumulator (Track C).
-// ---------------------------------------------------------------------------
 
-// Variable name for bad-row tuples.  L"BrrBadRows"
-static const efi_char16_t BRR_VARNAME_BADROWS[] = {
-    'B','r','r','B','a','d','R','o','w','s', 0
-};
+// ---------------------------------------------------------------------------
+// Row accumulator (Track C): records bank/rank/row tuples for chip-level
+// diagnostics.  NVRAM persistence for rows was removed (post-EBS runtime
+// SetVariable does not persist on Apple T2; brr-entry.efi handles
+// persistence pre-EBS on a per-page basis).  The record function stays
+// because error_hook.c calls it during tests.
+// ---------------------------------------------------------------------------
 
 #define MAX_BAD_ROWS  256
 
-// Packed tuple: ch, rank, bg, bank (1 byte each) + row (4 bytes) = 8 bytes.
-// Shim reads byte-for-byte via cfl_decode_shim.c; __attribute__((packed))
-// + _Static_assert guards against future field additions breaking the ABI.
 typedef struct __attribute__((packed)) {
     uint8_t  ch;
     uint8_t  rank;
@@ -627,8 +314,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  bank;
     uint32_t row;
 } bad_row_t;
-_Static_assert(sizeof(bad_row_t) == 8,
-               "BrrBadRows on-disk layout must stay 8 bytes/tuple");
+_Static_assert(sizeof(bad_row_t) == 8, "row tuple layout");
 
 static bad_row_t row_log[MAX_BAD_ROWS];
 static unsigned  row_count;
@@ -636,75 +322,19 @@ static unsigned  row_count;
 void badmem_log_record_row(uint8_t channel, uint8_t rank,
                             uint8_t bg, uint8_t bank, uint32_t row)
 {
-    // Deduplicate: scan existing entries.
     for (unsigned i = 0; i < row_count; i++) {
         if (row_log[i].ch   == channel &&
             row_log[i].rank == rank    &&
             row_log[i].bg   == bg      &&
             row_log[i].bank == bank    &&
             row_log[i].row  == row)
-            return;  // already recorded
+            return;
     }
-
-    if (row_count >= MAX_BAD_ROWS) return;  // cap
-
+    if (row_count >= MAX_BAD_ROWS) return;
     row_log[row_count].ch   = channel;
     row_log[row_count].rank = rank;
     row_log[row_count].bg   = bg;
     row_log[row_count].bank = bank;
     row_log[row_count].row  = row;
     row_count++;
-}
-
-// Binary blob header written to BrrBadRows.
-typedef struct {
-    uint32_t version;   // = 1
-    uint32_t count;     // number of bad_row_t tuples that follow
-} badrows_hdr_t;
-
-void badmem_log_flush_rows_nvram(void)
-{
-    if (row_count == 0) return;
-
-    efi_runtime_services_t *rt = hwctrl_get_efi_rt();
-    if (!rt) return;
-
-    unsigned n = row_count;
-    if (n > MAX_BAD_ROWS) n = MAX_BAD_ROWS;
-
-    // blob: 8-byte header + n * 8-byte tuples = max 2056 bytes.
-    static uint8_t blob[sizeof(badrows_hdr_t) + MAX_BAD_ROWS * sizeof(bad_row_t)];
-    badrows_hdr_t *hdr = (badrows_hdr_t *)blob;
-    hdr->version = 1;
-    hdr->count   = n;
-
-    bad_row_t *dst = (bad_row_t *)(blob + sizeof(badrows_hdr_t));
-    for (unsigned i = 0; i < n; i++) dst[i] = row_log[i];
-
-    uintn_t blob_size = sizeof(badrows_hdr_t) + (uintn_t)n * sizeof(bad_row_t);
-
-    set_variable_fn set_var = (set_variable_fn)(uintptr_t)rt->set_variable;
-
-    efi_status_t s = set_var(
-        (efi_char16_t *)BRR_VARNAME_BADROWS,
-        (efi_guid_t *)&BRR_GUID,
-        EFI_VAR_NV_BS_RT,
-        blob_size, blob);
-
-    // Dual-write under Apple-GUID for T2 persistence.
-    set_var(
-        (efi_char16_t *)BRR_VARNAME_BADROWS,
-        (efi_guid_t *)&APPLE_GUID,
-        EFI_VAR_NV_BS_RT,
-        blob_size, blob);
-
-    if (s == EFI_SUCCESS) {
-        display_scrolled_message(0, "[nvram] saved %u bad row(s) to BrrBadRows", n);
-        scroll();
-    } else {
-        display_scrolled_message(0,
-            "[nvram] WARNING: could not save BrrBadRows (status %x)",
-            (uintptr_t)s);
-        scroll();
-    }
 }
