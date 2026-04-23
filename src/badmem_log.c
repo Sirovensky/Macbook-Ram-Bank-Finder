@@ -29,6 +29,16 @@ static const efi_guid_t BRR_GUID = {
     { 0x9d, 0x1e, 0x5f, 0x6a, 0x7b, 0x8c, 0x9d, 0x0e }
 };
 
+// Apple NVRAM vendor GUID {7C436110-AB2A-4BBB-A880-FE41995C9F82}.
+// Apple's T2 commits writes under this GUID reliably (it's the GUID
+// macOS uses for its own NVRAM variables like "boot-args").  We
+// dual-write state vars under BOTH GUIDs at pass end; readers try
+// BRR_GUID first (clean) then APPLE_GUID (fallback that T2 persists).
+static const efi_guid_t APPLE_GUID = {
+    0x7c436110, 0xab2a, 0x4bbb,
+    { 0xa8, 0x80, 0xfe, 0x41, 0x99, 0x5c, 0x9f, 0x82 }
+};
+
 // Variable name for the binary bad-pages array.
 // UTF-16 literal: L"BrrBadPages"
 static const efi_char16_t BRR_VARNAME_BADPAGES[] = {
@@ -438,6 +448,17 @@ void badmem_log_flush_nvram(void)
         (efi_guid_t *)&BRR_GUID,
         EFI_VAR_NV_BS_RT,
         state_len, (void *)new_state);
+
+    // Dual-write under Apple NVRAM GUID — T2 commits Apple vars
+    // reliably even when it filters writes to custom GUIDs.
+    efi_status_t ss_apple = set_var(
+        (efi_char16_t *)BRR_VARNAME_STATE,
+        (efi_guid_t *)&APPLE_GUID,
+        EFI_VAR_NV_BS_RT,
+        state_len, (void *)new_state);
+    display_scrolled_message(0, "[nvram] apple-GUID state setv status=%x",
+                              (uintptr_t)ss_apple);
+    scroll();
 
     if (ss == EFI_SUCCESS) {
         display_scrolled_message(0, "[nvram] state -> %s", new_state);

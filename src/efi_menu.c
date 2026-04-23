@@ -383,6 +383,16 @@ static unsigned con_read_line(char *buf, unsigned cap)
 // Read BrrMaskState from NVRAM, with legacy A1990MaskState fallback.
 // Returns length read or 0 on any failure.
 // ---------------------------------------------------------------------------
+// Apple NVRAM vendor GUID -- T2 commits writes under this GUID even
+// when it silently drops runtime writes to custom GUIDs.
+static const efi_guid_t APPLE_GUID = {
+    0x7c436110, 0xab2a, 0x4bbb,
+    { 0xa8, 0x80, 0xfe, 0x41, 0x99, 0x5c, 0x9f, 0x82 }
+};
+
+// Forward declaration so read_state can log breadcrumbs.
+static void brr_buf_log(const char *s);
+
 static unsigned read_state(char *out, unsigned cap)
 {
     if (!g_rs) return 0;
@@ -390,7 +400,7 @@ static unsigned read_state(char *out, unsigned cap)
         (get_variable_fn)(uintptr_t)g_rs->get_variable;
     if (!get_var) return 0;
 
-    // Try canonical name first.
+    // Try canonical name under BRR_GUID first.
     uintn_t sz = cap;
     uint32_t attrs = 0;
     efi_status_t s = get_var(
@@ -398,6 +408,18 @@ static unsigned read_state(char *out, unsigned cap)
         (efi_guid_t *)&BRR_GUID,
         &attrs, &sz, out);
     if (s == EFI_SUCCESS) return (unsigned)sz;
+
+    // Try the SAME name under APPLE_GUID -- T2 commits those.
+    sz = cap;
+    attrs = 0;
+    s = get_var(
+        (efi_char16_t *)BRR_VARNAME_STATE,
+        (efi_guid_t *)&APPLE_GUID,
+        &attrs, &sz, out);
+    if (s == EFI_SUCCESS) {
+        brr_buf_log("[read_state] found under APPLE_GUID\n");
+        return (unsigned)sz;
+    }
 
     // Fallback: legacy variable name from older installs.
     sz = cap;
