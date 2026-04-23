@@ -165,7 +165,7 @@ apply_patch 0006-bootparams-a1990-flags.patch  "brr_flags"             "boot/boo
 apply_patch 0007-efi-pre-boot-menu.patch       "efi_menu"              "boot/efisetup.c"
 # Track C: NVRAM auto-save and auto-reboot
 apply_patch 0008-expose-efi-rt.patch           "hwctrl_get_efi_rt"     "system/x86/hwctrl.c"
-apply_patch 0009-nvram-auto-reboot.patch       "badmem_log_flush_nvram" "app/main.c"
+apply_patch 0009-nvram-auto-reboot.patch       "brr-entry.efi" "app/main.c"
 # T2 auto-reboot: memtest's panic handler waits for keypress that never
 # comes on A1990 (T2 blocks post-EBS keyboard).  Patch adds 60 s timer.
 apply_patch 0010-panic-auto-reboot.patch       "auto-reboot in 60 s"   "app/x86/interrupt.c"

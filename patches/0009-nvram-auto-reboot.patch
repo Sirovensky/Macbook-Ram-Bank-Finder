@@ -1,43 +1,31 @@
 --- a/app/main.c
 +++ b/app/main.c
-@@ -733,6 +733,49 @@ void main(void)
+@@ -733,6 +733,41 @@ void main(void)
              extern void badmem_log_dump(void);
              if (pass_num > 0)
                  badmem_log_dump();
 +            extern void set_scroll_lock(bool);
 +            set_scroll_lock(false);
++
++            // NVRAM writes intentionally NOT called here: Apple T2 does
++            // not persist post-ExitBootServices runtime SetVariable even
++            // when the call returns SUCCESS.  The pre-EBS brr-entry.efi
++            // tool (grub entry 8) handles state persistence instead.
++
++            // Chip / row decode (shows which physical chip failed).
 +            extern void board_decode_pass(void);
 +            if (pass_num > 0)
 +                board_decode_pass();
-+            extern void badmem_log_flush_nvram(void);
++
++            // FINAL visible block: clean copy-pastable bad-address list.
 +            if (pass_num > 0)
-+                badmem_log_flush_nvram();
-+            extern void badmem_log_flush_rows_nvram(void);
-+            if (pass_num > 0)
-+                badmem_log_flush_rows_nvram();
++                badmem_log_dump();
 +            {
-+                /* BRR: detect-only flow on Apple T2.
-+                 *
-+                 * T2 drops post-ExitBootServices NVRAM writes silently,
-+                 * so the auto-reboot-to-shim chain never worked.  Flow:
-+                 *   1. Run memtest tests (post-EBS, full accuracy).
-+                 *   2. Display bad-address list clearly at pass end.
-+                 *   3. Halt -- user powers off manually.
-+                 *   4. On next boot, user picks grub entry 8
-+                 *      (brr-entry.efi) and types addresses into a
-+                 *      pre-EBS form.  That tool writes NVRAM via Boot
-+                 *      Services (the path T2 DOES persist) and
-+                 *      chainloads mask-shim.efi.
-+                 */
 +                extern unsigned badmem_log_count(void);
 +                extern void scroll(void);
-+
 +                bool had_errors = (pass_num > 0) && (badmem_log_count() > 0);
-+
-+                /* Build marker -- proves the running binary is the fresh ISO. */
 +                display_scrolled_message(0, "[build] " __DATE__ " " __TIME__);
 +                scroll();
-+
 +                if (had_errors) {
 +                    display_scrolled_message(0, "[brr] detect pass complete -- halting.");
 +                    scroll();
