@@ -119,6 +119,25 @@ current design runs the shim from USB on every boot; a future
 `BootNNNN` override so the shim auto-runs without USB. That's the
 next milestone, not shipped yet.
 
+### NVRAM and AllocatePages are independent layers — no conflict
+
+Two separate mechanisms cooperate here:
+
+- **NVRAM** stores the list of bad addresses. Survives reboot.
+  If mask-shim's chainload fails for any reason, NVRAM stays
+  intact and you can retry (entry 3 → Y). No code path deletes
+  `BrrBadPages` on failure.
+- **AllocatePages** reserves the actual pages in the UEFI memory
+  map handed to macOS. Only effective for the one macOS session
+  the shim chainloads. Does NOT persist across reboot — the shim
+  re-applies on every boot by re-reading NVRAM.
+
+Because the two layers address different lifetimes (persistent
+address list vs per-session reservation), they can't conflict.
+Running with both is the intended design: the NVRAM list is the
+durable source of truth, the per-session reservation is the
+actual protection.
+
 ---
 
 ## Reading a mask-shim transcript
