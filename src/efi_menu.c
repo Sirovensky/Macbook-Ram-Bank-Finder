@@ -130,8 +130,14 @@ typedef struct efi_brr_sfs_t {
 
 // Handles captured pre-ExitBootServices, usable from post-EBS code IF
 // Apple T2 firmware does not invalidate the function pointers on EBS.
-// NULL if capture failed or efi_menu has not run yet.
-efi_brr_file_t *g_brr_fs_root = 0;
+// Sentinel (uintptr_t)1 is "not captured yet".  NULL (0) would place
+// the variable in .bss and get wiped by startup64.S:258-268's BSS
+// zero loop (same bug we fought on g_brr_flags_cached) BEFORE main()
+// runs -- by the time badmem_log calls us post-EBS the handle would
+// already be gone.  Non-zero initializer forces .data placement,
+// which survives the BSS zero.
+efi_brr_file_t *g_brr_fs_root = (efi_brr_file_t *)(uintptr_t)1;
+#define BRR_FS_ROOT_VALID(p) ((p) != 0 && (p) != (efi_brr_file_t *)(uintptr_t)1)
 
 // Write narrow ASCII content to a file at the USB ESP root.  Returns 0
 // on success, EFI status on failure (use print_string to log since
@@ -143,7 +149,7 @@ int brr_fs_write_file(const efi_char16_t *path, unsigned path_chars,
                       const char *content, unsigned len)
 {
     (void)path_chars;
-    if (!g_brr_fs_root) return -1;
+    if (!BRR_FS_ROOT_VALID(g_brr_fs_root)) return -1;
     efi_brr_file_t *root = g_brr_fs_root;
 
     efi_brr_file_t *f = 0;
@@ -607,13 +613,21 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
 
     if (!g_con_out || !g_con_in || !g_bs) return 0;
 
+    // Helper macro: pause N ms via BS Stall.  Used between pre-EBS
+    // diagnostic lines so the user can actually read them before the
+    // screen clears into memtest's framebuffer.
+    efi_stall_fn brr_stall = (efi_stall_fn)(uintptr_t)g_bs->stall;
+#define BRR_PAUSE_MS(ms) do { if (brr_stall) brr_stall((ms) * 1000u); } while (0)
+
     // BRR: capture Simple File System root handle pre-ExitBootServices.
     // Used by badmem_log to write state/pages files post-EBS.  This is
     // only safe if T2 firmware leaves the function pointers valid after
     // ExitBootServices; if it zeroes / unmaps them, the post-EBS call
-    // will fault.  We also write a "boot-log.txt" marker here pre-EBS
+    // will fault.  We also write a "brr-boot.txt" marker here pre-EBS
     // so the user can confirm from macOS that file-write is working at
-    // all.
+    // all.  Reset to 0 before capture (pre-capture sentinel value is
+    // (void *)1 to force .data placement; 0 means "capture attempted
+    // and failed" -- distinguishable post-EBS).
     g_brr_fs_root = 0;
     {
         efi_loaded_image_t *li = 0;
@@ -662,6 +676,7 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
             con_puts("  [fs] loaded-image device_handle NULL\r\n");
         }
     }
+    BRR_PAUSE_MS(1500);
 
     // ---------------------------------------------------------------------------
     // Grub unattended mode: `brr_auto_page` or `brr_auto_chip` in the
@@ -707,12 +722,14 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
         }
         con_puts("\r\n");
 
+        BRR_PAUSE_MS(1500);
+
         // Also probe the USB ESP files written by the prior boot.
         // Reads happen pre-EBS via the same SimpleFileSystem root we
         // just opened.  If \brr-state.txt shows TRIAL_PENDING_PAGE,
         // the post-EBS file-write path works on this T2 and we can
         // drop NVRAM entirely.
-        if (g_brr_fs_root) {
+        if (BRR_FS_ROOT_VALID(g_brr_fs_root)) {
             static const efi_char16_t files[][20] = {
                 { '\\','b','r','r','-','b','o','o','t','.','t','x','t', 0 },
                 { '\\','b','r','r','-','s','t','a','t','e','.','t','x','t', 0 },
@@ -730,6 +747,7 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
                     con_puts("NOT FOUND (status 0x");
                     con_put_dec((unsigned)(s & 0xFFFFFFFFu));
                     con_puts(")\r\n");
+                    BRR_PAUSE_MS(1500);
                     continue;
                 }
                 static char rbuf[128];
@@ -740,6 +758,7 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
                     con_puts("READ FAILED (status 0x");
                     con_put_dec((unsigned)(s & 0xFFFFFFFFu));
                     con_puts(")\r\n");
+                    BRR_PAUSE_MS(1500);
                     continue;
                 }
                 rbuf[rlen < sizeof(rbuf) ? rlen : sizeof(rbuf) - 1] = 0;
@@ -753,16 +772,17 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
                     con_puts(buf);
                 }
                 con_puts("\"\r\n");
+                BRR_PAUSE_MS(1500);
             }
         } else {
             con_puts("  [file] SFS root unavailable, cannot probe files\r\n");
+            BRR_PAUSE_MS(2000);
         }
 
-        // Pause briefly so user can see probe output before screen clear.
-        if (g_bs && g_bs->stall) {
-            efi_stall_fn do_stall = (efi_stall_fn)(uintptr_t)g_bs->stall;
-            do_stall(5000000);  // 5 s
-        }
+        // Final pause so user can see overall probe output before tests
+        // start (or chainload fires).
+        con_puts("\r\n  [probe] done -- continuing in 5 s ...\r\n");
+        BRR_PAUSE_MS(5000);
 
         if (probe_sz == 0) {
             // No existing state — this is a fresh NONE boot; run the
