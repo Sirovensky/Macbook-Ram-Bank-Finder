@@ -17,8 +17,12 @@ build: apply
 iso: build
 	@./scripts/build-iso.sh
 
-# Build EFI helper applications (mask-shim.efi, install.efi).
-# These are built separately from memtest86plus inside the same Docker image.
+# Build all EFI helper applications.  Shipping in the ISO:
+#   brr-entry.efi  -- pre-EBS UI for entering bad addresses (grub entry 3)
+#   mask-shim.efi  -- applies the mask via AllocatePages, chainloads macOS
+# Staged in the ESP but not yet wired into the grub menu (future milestone):
+#   install.efi    -- copy shim to internal ESP + register BootNNNN override
+#   revert.efi     -- restore pre-install BootOrder + delete \EFI\BRR\
 efi:
 	$(MAKE) -C efi
 
@@ -47,7 +51,7 @@ help:
 	@echo "targets:"
 	@echo "  apply      - generate board_table.c, sync into memtest86plus, patch"
 	@echo "  build      - compile memtest.efi + memtest.bin (needs Linux toolchain)"
-	@echo "  efi        - build mask-shim.efi + install.efi (EFI helper apps)"
+	@echo "  efi        - build mask-shim.efi + brr-entry.efi + install/revert.efi"
 	@echo "  test-shim  - run hosted badmem.txt parser unit tests"
 	@echo "  iso        - produce dist/a1990-memtest.iso (needs grub-mkrescue, xorriso)"
 	@echo "  docker     - build ISO inside a Debian container (works on macOS)"
