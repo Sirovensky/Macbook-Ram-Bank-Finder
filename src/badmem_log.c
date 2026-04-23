@@ -1,98 +1,27 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// badmem_log — accumulate bad physical page addresses during a memtest run,
-// then dump them as a pasteable badmem.txt block and/or persist them to NVRAM
-// so the next boot's mask-install / mask-shim can read them automatically.
+// badmem_log — accumulate bad physical page addresses + chip designators
+// during a memtest run, then dump them on-screen as a copy-pasteable block
+// at pass end.  No NVRAM writes: post-ExitBootServices Runtime SetVariable
+// does not persist on Apple T2, so persistence happens later in
+// brr-entry.efi (pre-EBS) after the user photographs this block.
 //
-// Uses a fixed static array (no heap dependency).  Maximum 4096 unique
-// page-aligned ranges — well beyond any realistic BGA failure pattern.
+// Uses fixed static arrays (no heap dependency).  Limits:
+//   MAX_ENTRIES = 4096 unique page-aligned bad addresses
+//   CHIPS_BUF_SIZE = 256 bytes of comma-separated chip designators
+//   MAX_BAD_ROWS = 256 bank/rank/row tuples (row-mode accumulator)
+//   SKIP_MAX = 64 error-burst regions excluded mid-test
+//
+// Earlier revisions called Runtime SetVariable at pass end to flush these
+// structures to NVRAM.  That code was removed; see git history if you
+// want to resurrect it for a non-T2 platform.
 
 #include "badmem_log.h"
-
-// efi.h is reachable via -I../../boot in the system/board build.
-#include "efi.h"
 
 #include "display.h"
 
 extern int scroll_message_row;
 extern void scroll(void);
-
-// Accessor provided by patches/0008-expose-efi-rt.patch applied to hwctrl.c.
-extern efi_runtime_services_t *hwctrl_get_efi_rt(void);
-
-// ---------------------------------------------------------------------------
-// NVRAM vendor GUID shared with mask-shim and mask-install.
-// {3E3E9DB2-1A2B-4B5C-9D1E-5F6A7B8C9D0E}
-// ---------------------------------------------------------------------------
-static const efi_guid_t BRR_GUID = {
-    0x3e3e9db2, 0x1a2b, 0x4b5c,
-    { 0x9d, 0x1e, 0x5f, 0x6a, 0x7b, 0x8c, 0x9d, 0x0e }
-};
-
-// Variable name for the binary bad-pages array.
-// UTF-16 literal: L"BrrBadPages"
-static const efi_char16_t BRR_VARNAME_BADPAGES[] = {
-    'B','r','r','B','a','d','P','a','g','e','s', 0
-};
-
-// Variable name for chip designators.  L"BrrBadChips"
-static const efi_char16_t BRR_VARNAME_BADCHIPS[] = {
-    'B','r','r','B','a','d','C','h','i','p','s', 0
-};
-
-// Variable name for state machine.  L"BrrMaskState"
-static const efi_char16_t BRR_VARNAME_STATE[] = {
-    'B','r','r','M','a','s','k','S','t','a','t','e', 0
-};
-
-// Legacy variable names for migration fallback (read-only; we only write Brr* names).
-static const efi_char16_t LEGACY_VARNAME_BADPAGES[] = {
-    'A','1','9','9','0','B','a','d','P','a','g','e','s', 0
-};
-static const efi_char16_t LEGACY_VARNAME_BADCHIPS[] = {
-    'A','1','9','9','0','B','a','d','C','h','i','p','s', 0
-};
-static const efi_char16_t LEGACY_VARNAME_STATE[] = {
-    'A','1','9','9','0','M','a','s','k','S','t','a','t','e', 0
-};
-
-// State strings (ASCII, written to NVRAM as-is).
-#define STATE_TRIAL_PENDING_PAGE  "TRIAL_PENDING_PAGE"
-#define STATE_TRIAL_PENDING_CHIP  "TRIAL_PENDING_CHIP"
-
-// ---------------------------------------------------------------------------
-// SetVariable / GetVariable function-pointer types.
-//
-// efi_runtime_services_t in memtest86plus/boot/efi.h stores set_variable and
-// get_variable as plain `unsigned long` (not typed fn ptrs).  We cast them
-// here to avoid requiring changes to the upstream header.
-// ---------------------------------------------------------------------------
-typedef efi_status_t (efiapi *set_variable_fn)(
-    efi_char16_t *name,
-    efi_guid_t   *guid,
-    uint32_t      attrs,
-    uintn_t       data_size,
-    void         *data);
-
-typedef efi_status_t (efiapi *get_variable_fn)(
-    efi_char16_t *name,
-    efi_guid_t   *guid,
-    uint32_t     *attrs,
-    uintn_t      *data_size,
-    void         *data);
-
-// EFI variable attribute bits.
-#define EFI_VAR_NV_BS_RT  (0x00000001u | 0x00000002u | 0x00000004u)
-
-
-// ---------------------------------------------------------------------------
-// Binary blob layout written to NVRAM.
-// ---------------------------------------------------------------------------
-typedef struct {
-    uint32_t version;   // = 1
-    uint32_t count;     // number of uint64_t PA entries that follow
-    // uint64_t pages[count] follows immediately.
-} badpages_hdr_t;
 
 // ---------------------------------------------------------------------------
 // Page accumulator.
