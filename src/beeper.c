@@ -3,12 +3,14 @@
 // beeper — PC-speaker pass-end announcement.
 //
 // Drives the classic PIT channel-2 / port 0x61 speaker so the user
-// hears an audible tone when a pass completes and the 30 s auto-
-// reboot countdown begins.  T2 laptops may have the speaker path
+// hears an audible tone when a pass completes, even if they're not
+// looking at the screen.  T2 laptops may have the speaker path
 // physically disconnected or firmware-filtered; in that case the
 // port writes are silent no-ops and nothing bad happens.
 //
-// Safe to call from single-threaded pass-end context (no locks).
+// Called once from board_decode_pass() at the end of each memtest
+// pass (halt-only flow; no auto-reboot).  Safe from single-threaded
+// pass-end context (no locks).
 
 #include "stdint.h"
 
@@ -44,9 +46,9 @@ static void speaker_off(void)
 }
 
 // Play a short three-beep attention chirp: 800 Hz, 200 ms on / 100 ms
-// off, ×3.  Total ~900 ms.  Called from board_decode_pass() right
-// before the 30 s auto-reboot countdown so the user hears it whether
-// they're at the laptop or across the room.  No-op if the hardware
+// off, x3.  Total ~900 ms.  Called from board_decode_pass() after the
+// final bad-address dump, just before the test halts — lets the user
+// know the pass is done from another room.  No-op if the hardware
 // path is filtered (port writes silently ignored).
 void board_beep_pass_end(void)
 {
