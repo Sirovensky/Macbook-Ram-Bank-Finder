@@ -72,6 +72,13 @@ EFI_STATUS mask_nvram_set_ascii(EFI_SYSTEM_TABLE *st, const CHAR16 *name,
         sz, (void *)val);
 }
 
+// Apple NVRAM vendor GUID — T2 commits writes under this GUID even
+// when it silently drops runtime writes to custom GUIDs.
+static const EFI_GUID APPLE_GUID_OPS = {
+    0x7c436110, 0xab2a, 0x4bbb,
+    { 0xa8, 0x80, 0xfe, 0x41, 0x99, 0x5c, 0x9f, 0x82 }
+};
+
 EFI_STATUS mask_nvram_get_ascii(EFI_SYSTEM_TABLE *st, const CHAR16 *name,
                                  char *buf, UINTN bufsz)
 {
@@ -79,6 +86,15 @@ EFI_STATUS mask_nvram_get_ascii(EFI_SYSTEM_TABLE *st, const CHAR16 *name,
     UINT32 attrs = 0;
     EFI_STATUS s = st->RuntimeServices->GetVariable(
         (CHAR16 *)name, (EFI_GUID *)&BRR_GUID, &attrs, &sz, buf);
+    if (s == EFI_SUCCESS) { buf[sz] = '\0'; return s; }
+
+    // Fallback: try Apple vendor GUID -- T2 persists these even when
+    // runtime writes to our custom GUID silently drop on graceful
+    // shutdown.  memtest dual-writes under both GUIDs at pass end.
+    sz = bufsz - 1;
+    attrs = 0;
+    s = st->RuntimeServices->GetVariable(
+        (CHAR16 *)name, (EFI_GUID *)&APPLE_GUID_OPS, &attrs, &sz, buf);
     if (s == EFI_SUCCESS) buf[sz] = '\0';
     return s;
 }
