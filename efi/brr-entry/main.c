@@ -26,6 +26,42 @@
 #include "../badmem_parse.h"
 #include "../mask-common/mask_ops.h"
 
+// Apple firmware EFI_CONSOLE_CONTROL_PROTOCOL (legacy from EFI 1.x,
+// kept by Apple for Mac-specific console switching).  Grub leaves the
+// console in graphics mode when it chainloads us; without a switch to
+// text mode via THIS protocol, UEFI ConOut OutputString renders to the
+// void.  Standard SimpleTextOutput->SetMode does NOT fix this on Apple
+// firmware.  This is the same mechanism grub itself uses to display
+// its menu / error text.
+// GUID: F42F7782-012E-4C12-9956-49F94304F721
+static const EFI_GUID CONSOLE_CONTROL_GUID = {
+    0xf42f7782, 0x012e, 0x4c12,
+    { 0x99, 0x56, 0x49, 0xf9, 0x43, 0x04, 0xf7, 0x21 }
+};
+
+typedef enum {
+    ECC_SCREEN_TEXT     = 0,
+    ECC_SCREEN_GRAPHICS = 1,
+    ECC_SCREEN_MAX      = 2
+} ECC_SCREEN_MODE;
+
+typedef struct ECC_s {
+    EFI_STATUS (EFIAPI *GetMode)(struct ECC_s *this_, ECC_SCREEN_MODE *mode,
+                                   BOOLEAN *uga, BOOLEAN *std_in_locked);
+    EFI_STATUS (EFIAPI *SetMode)(struct ECC_s *this_, ECC_SCREEN_MODE mode);
+    EFI_STATUS (EFIAPI *LockStdIn)(struct ECC_s *this_, CHAR16 *password);
+} EFI_CONSOLE_CONTROL_PROTOCOL;
+
+static void force_text_mode(EFI_SYSTEM_TABLE *st)
+{
+    EFI_CONSOLE_CONTROL_PROTOCOL *cc = NULL;
+    EFI_STATUS s = st->BootServices->LocateProtocol(
+        (EFI_GUID *)&CONSOLE_CONTROL_GUID, NULL, (void **)&cc);
+    if (s == EFI_SUCCESS && cc && cc->SetMode) {
+        cc->SetMode(cc, ECC_SCREEN_TEXT);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Small ASCII helpers (no libc).
 // ---------------------------------------------------------------------------
@@ -232,10 +268,39 @@ static EFI_STATUS chainload_shim(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 // ---------------------------------------------------------------------------
 EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 {
-    // Clear screen and move cursor home (ANSI escape via CHAR16).
-    static const CHAR16 clrscr[] = { 0x001B, L'[', L'2', L'J',
-                                       0x001B, L'[', L'H', 0 };
-    st->ConOut->OutputString(st->ConOut, (CHAR16 *)clrscr);
+    // Apple-specific: switch console from grub's graphics mode back
+    // to text mode via EFI_CONSOLE_CONTROL_PROTOCOL.  Without this,
+    // text rendered via ConOut is invisible on A1990 after grub
+    // chainloads us.
+    force_text_mode(st);
+
+    // Force a real text mode -- grub leaves the console in gfxterm
+    // graphics mode, and UEFI ConOut text output renders invisibly
+    // there on A1990.  Query available text modes, pick the largest
+    // one (so we get decent density on a Retina panel), reset the
+    // input buffer, then clear.
+    if (st->ConOut && st->ConOut->SetMode) {
+        // Try common text-mode indices from largest to smallest.
+        // EFI defines mode 0 = 80x25 (required), others vendor-defined.
+        // Apple firmware typically has 0=80x25, 1=80x50, higher numbers
+        // for larger text consoles.
+        UINTN cols = 0, rows = 0;
+        UINTN best_mode = 0;
+        UINTN best_area = 0;
+        for (UINTN m = 0; m < 8; m++) {
+            EFI_STATUS q = st->ConOut->QueryMode(st->ConOut, m, &cols, &rows);
+            if (q != EFI_SUCCESS) continue;
+            UINTN area = cols * rows;
+            if (area > best_area) { best_area = area; best_mode = m; }
+        }
+        st->ConOut->SetMode(st->ConOut, best_mode);
+        if (st->ConOut->SetAttribute)
+            st->ConOut->SetAttribute(st->ConOut, 0x07);  // light-gray on black
+        if (st->ConOut->ClearScreen)
+            st->ConOut->ClearScreen(st->ConOut);
+    }
+    if (st->ConIn && st->ConIn->Reset)
+        st->ConIn->Reset(st->ConIn, 0);
 
     efi_print(st, L"=====================================================\r\n");
     efi_print(st, L"  BRR bad-address entry tool\r\n");
