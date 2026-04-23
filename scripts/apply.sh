@@ -200,5 +200,11 @@ apply_patch 0017-no-fail-banner.patch "BRR: suppress the FAIL banner" "app/displ
 # then triple-fault as guaranteed last resort.  Default reboot()
 # fell through on A1990 because T2 blocks every soft-reset path.
 apply_patch 0018-reboot-t2-hardened.patch "BRR: verbose reboot diagnostics" "system/x86/hwctrl.c"
+# Re-cache brr_flags after startup64.S BSS zero: efi_menu() wrote
+# g_brr_flags_cached pre-ExitBootServices but the asm BSS-zero loop
+# (startup64.S:258-268, triggered on first_boot=1) wipes it before
+# main() runs.  Copy bp->brr_flags (UEFI-pool mem, not in BSS, still
+# pristine here) into the BSS cache as the first act of global_init.
+apply_patch 0019-brr-flags-recache.patch "BRR: re-cache brr_flags post-BSS-zero" "app/main.c"
 
 echo "==> ready. build: cd $mt/build/x86_64 && make"

@@ -1,0 +1,21 @@
+--- a/app/main.c
++++ b/app/main.c
+@@ -212,6 +212,18 @@ static void global_init(void)
+     // Nothing before this should access the boot parameters, in case they are located above 4GB.
+     // This is the first region we map, so it is guaranteed not to fail.
+     boot_params_addr = map_region(boot_params_addr, sizeof(boot_params_t), true);
++
++    // BRR: re-cache brr_flags post-BSS-zero
++    // startup64.S zeros .bss from _bss.._end after efi_setup returns and before
++    // main() runs, so the value efi_menu() wrote to g_brr_flags_cached is lost.
++    // bp->brr_flags (UEFI-pool mem) survives the zero but is later clobbered by
++    // memory tests writing over the boot_params region.  Re-populate the BSS
++    // cache here while bp is still pristine and before any tests run.
++    {
++        extern uint32_t g_brr_flags_cached;
++        boot_params_t *bp = (boot_params_t *)boot_params_addr;
++        g_brr_flags_cached = bp->brr_flags;
++    }
+
+     hwctrl_init();
+

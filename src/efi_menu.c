@@ -500,15 +500,25 @@ static int cmdline_has(const char *hay, const char *needle)
 
 // BRR: global flag cache in memtest-BSS.
 //
-// boot_params->brr_flags is unreliable at pass-end: map_region merely
-// maps the physical region for access, it does NOT remove it from
-// pm_map, so memory tests happily write garbage over the struct.
-// Observed value at pass end on A1990: 0x3b80b56d instead of the
-// expected 0x15 (bits 0,2,4).
+// Two distinct corruption sources at pass end on A1990:
+//   (1) boot_params->brr_flags is UEFI-pool memory but its region stays
+//       in pm_map (map_region only maps, doesn't reserve), so memory
+//       tests overwrite it with test patterns.  Observed at pass end:
+//       0x3b80b56d instead of the expected 0x15.
+//   (2) .bss variables like this one DO survive memory tests (the
+//       active image region is preserved across relocations) — but
+//       startup64.S:258-268 zeros .bss[_bss.._end] on first boot AFTER
+//       efi_setup() returns (which is where efi_menu() runs) and
+//       BEFORE main() runs.  So anything we write here pre-EBS gets
+//       wiped before main() can read it.
 //
-// Cache the value in memtest's own BSS (this file's translation
-// unit, safely inside _start.._end which memtest always excludes
-// from its test range).  Pass-end reads this, not bp->brr_flags.
+// Fix lives in two places:
+//   - efi_menu() wrapper below writes the cache pre-EBS (doomed but
+//     useful for a future refactor where startup BSS-zero is moved).
+//   - main.c::global_init() re-populates the cache from bp->brr_flags
+//     as the first act after boot_params is mapped — that read is made
+//     before any tests have run, so bp is still pristine, and the BSS
+//     cache then survives for the rest of the run.
 uint32_t g_brr_flags_cached = 0;
 
 static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const char *cmdline);
