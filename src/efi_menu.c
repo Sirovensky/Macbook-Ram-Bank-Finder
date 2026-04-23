@@ -566,6 +566,27 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
     {
         char state_probe[64] = {0};
         unsigned probe_sz = read_state(state_probe, sizeof(state_probe) - 1);
+
+        // Always-on diagnostic: shows on every boot whether NVRAM
+        // persistence across the T2 graceful-shutdown path is actually
+        // working.  On the detect->shutdown->boot cycle we expect to see
+        // "BrrMaskState sz=18 val=TRIAL_PENDING_PAGE" here; if we see
+        // sz=0 the write did not survive and the shim chain won't fire.
+        con_puts("\r\n  [probe] BrrMaskState sz=");
+        con_put_dec(probe_sz);
+        if (probe_sz > 0) {
+            con_puts(" val=\"");
+            for (unsigned i = 0; i < probe_sz && i < 40; i++) {
+                unsigned char ch = (unsigned char)state_probe[i];
+                char buf[2] = { (ch >= 0x20 && ch < 0x7f) ? (char)ch : '.', 0 };
+                con_puts(buf);
+            }
+            con_puts("\"");
+        } else {
+            con_puts(" (variable not found -- T2 did NOT persist write)");
+        }
+        con_puts("\r\n");
+
         if (probe_sz == 0) {
             // No existing state — this is a fresh NONE boot; run the
             // decoder self-test once so page-mode can later upgrade to
