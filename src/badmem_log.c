@@ -385,10 +385,14 @@ void badmem_log_flush_nvram(void)
     // ---------------------------------------------------------------------------
     // Phase B: determine chip-mode flag and conditionally flush BrrBadChips.
     // ---------------------------------------------------------------------------
-    uint32_t brr_flags = 0;
-    if (boot_params_addr != 0) {
-        brr_flags = *(volatile uint32_t *)(boot_params_addr + BRR_FLAGS_OFFSET);
-    }
+    // Read from efi_menu.c's BSS-stable cache, NOT from
+    // boot_params->brr_flags.  The latter gets clobbered by memory
+    // tests writing over the struct (map_region doesn't remove the
+    // region from pm_map, so tests write garbage on top of the
+    // Linux boot-protocol struct).  Observed corruption: bit 3
+    // spuriously set, triggering chip_mode when user asked for page.
+    extern uint32_t g_brr_flags_cached;
+    uint32_t brr_flags = g_brr_flags_cached;
 
     int chip_mode = (brr_flags & BRR_FLAG_AUTO_TRIAL_CHIP_BIT) != 0;
 
