@@ -462,6 +462,55 @@ void badmem_log_flush_nvram(void)
             (efi_guid_t *)&BRR_GUID, EFI_VAR_NV_BS_RT, 0, 0);
     set_var((efi_char16_t *)LEGACY_VARNAME_STATE,
             (efi_guid_t *)&BRR_GUID, EFI_VAR_NV_BS_RT, 0, 0);
+
+    // BRR: also write a plain-text state file on the USB ESP.  Uses
+    // the Simple File System protocol handle captured pre-EBS by
+    // efi_menu.c.  Success depends on T2 firmware preserving the
+    // function pointers across ExitBootServices; if not, the call
+    // silently returns a non-zero error (worst case: faults and we
+    // halt on the next line, which is also acceptable at this point).
+    extern int brr_fs_write_file(const efi_char16_t *, unsigned,
+                                  const char *, unsigned);
+    static const efi_char16_t path_state[] = {
+        '\\','b','r','r','-','s','t','a','t','e','.','t','x','t', 0
+    };
+    static const efi_char16_t path_pages[] = {
+        '\\','b','r','r','-','p','a','g','e','s','.','t','x','t', 0
+    };
+
+    // State file: single-line state string + newline.
+    char state_buf[64];
+    uintn_t sb = 0;
+    for (const char *p = new_state; *p && sb < sizeof(state_buf) - 2; p++)
+        state_buf[sb++] = *p;
+    state_buf[sb++] = '\n';
+    state_buf[sb] = 0;
+    int rc_s = brr_fs_write_file(path_state,
+        sizeof(path_state) / sizeof(efi_char16_t),
+        state_buf, (unsigned)sb);
+    display_scrolled_message(0, "[file] brr-state.txt write rc=%i", (uintptr_t)rc_s);
+    scroll();
+
+    // Pages file: "pa=0xADDR\n" per bad page.
+    static char pages_buf[4096];
+    uintn_t pb = 0;
+    for (unsigned i = 0; i < n && pb + 32 < sizeof(pages_buf); i++) {
+        const char *prefix = "pa=0x";
+        for (const char *p = prefix; *p; p++) pages_buf[pb++] = *p;
+        uint64_t pa = log_pages[i];
+        for (int nib = 15; nib >= 0; nib--) {
+            uint8_t x = (pa >> (nib * 4)) & 0xf;
+            pages_buf[pb++] = x < 10 ? ('0' + x) : ('a' + x - 10);
+        }
+        pages_buf[pb++] = '\n';
+    }
+    pages_buf[pb] = 0;
+    int rc_p = brr_fs_write_file(path_pages,
+        sizeof(path_pages) / sizeof(efi_char16_t),
+        pages_buf, (unsigned)pb);
+    display_scrolled_message(0, "[file] brr-pages.txt write rc=%i (%u bytes)",
+                              (uintptr_t)rc_p, (uintptr_t)pb);
+    scroll();
 }
 
 // ---------------------------------------------------------------------------

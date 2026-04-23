@@ -96,6 +96,70 @@ static const efi_guid_t DEVICE_PATH_GUID = {
     { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
 };
 
+// EFI Simple File System protocol GUID.
+static const efi_guid_t SFS_GUID = {
+    0x964e5b22, 0x6459, 0x11d2,
+    { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
+};
+
+// Minimal EFI File Protocol definitions — public struct layout is
+// sufficient for open/read/write/close.
+typedef struct efi_brr_file_t {
+    uint64_t revision;
+    efi_status_t (efiapi *open)(struct efi_brr_file_t *, struct efi_brr_file_t **,
+                                 efi_char16_t *, uint64_t, uint64_t);
+    efi_status_t (efiapi *close)(struct efi_brr_file_t *);
+    efi_status_t (efiapi *delete_file)(struct efi_brr_file_t *);
+    efi_status_t (efiapi *read)(struct efi_brr_file_t *, uintn_t *, void *);
+    efi_status_t (efiapi *write)(struct efi_brr_file_t *, uintn_t *, void *);
+    efi_status_t (efiapi *get_position)(struct efi_brr_file_t *, uint64_t *);
+    efi_status_t (efiapi *set_position)(struct efi_brr_file_t *, uint64_t);
+    efi_status_t (efiapi *get_info)(struct efi_brr_file_t *, efi_guid_t *, uintn_t *, void *);
+    efi_status_t (efiapi *set_info)(struct efi_brr_file_t *, efi_guid_t *, uintn_t, void *);
+    efi_status_t (efiapi *flush)(struct efi_brr_file_t *);
+} efi_brr_file_t;
+
+typedef struct efi_brr_sfs_t {
+    uint64_t revision;
+    efi_status_t (efiapi *open_volume)(struct efi_brr_sfs_t *, efi_brr_file_t **);
+} efi_brr_sfs_t;
+
+#define EFI_BRR_FILE_MODE_READ    0x0000000000000001ULL
+#define EFI_BRR_FILE_MODE_WRITE   0x0000000000000002ULL
+#define EFI_BRR_FILE_MODE_CREATE  0x8000000000000000ULL
+
+// Handles captured pre-ExitBootServices, usable from post-EBS code IF
+// Apple T2 firmware does not invalidate the function pointers on EBS.
+// NULL if capture failed or efi_menu has not run yet.
+efi_brr_file_t *g_brr_fs_root = 0;
+
+// Write narrow ASCII content to a file at the USB ESP root.  Returns 0
+// on success, EFI status on failure (use print_string to log since
+// ConOut may not be usable post-EBS).  Called from badmem_log.c at
+// pass end — this is POST-ExitBootServices, which is the dangerous
+// moment: Apple T2 may have torn down the filesystem driver function
+// pointers.  We still try: cost is a fault-halt at worst.
+int brr_fs_write_file(const efi_char16_t *path, unsigned path_chars,
+                      const char *content, unsigned len)
+{
+    (void)path_chars;
+    if (!g_brr_fs_root) return -1;
+    efi_brr_file_t *root = g_brr_fs_root;
+
+    efi_brr_file_t *f = 0;
+    efi_status_t s = root->open(root, &f, (efi_char16_t *)path,
+        EFI_BRR_FILE_MODE_READ | EFI_BRR_FILE_MODE_WRITE |
+        EFI_BRR_FILE_MODE_CREATE, 0);
+    if (s != EFI_SUCCESS || !f) return (int)(s & 0xFF);
+
+    f->set_position(f, 0);
+    uintn_t wlen = len;
+    s = f->write(f, &wlen, (void *)content);
+    f->flush(f);
+    f->close(f);
+    return (s == EFI_SUCCESS) ? 0 : (int)(s & 0xFF);
+}
+
 // LoadImage / StartImage fn-pointer types (fields are `void *` in efi.h).
 typedef efi_status_t (efiapi *load_image_fn)(
     unsigned char boot_policy, efi_handle_t parent,
@@ -542,6 +606,62 @@ static uint32_t efi_menu_impl(void *sys_table_arg, void *image_handle_arg, const
     g_rs      = st->runtime_services;
 
     if (!g_con_out || !g_con_in || !g_bs) return 0;
+
+    // BRR: capture Simple File System root handle pre-ExitBootServices.
+    // Used by badmem_log to write state/pages files post-EBS.  This is
+    // only safe if T2 firmware leaves the function pointers valid after
+    // ExitBootServices; if it zeroes / unmaps them, the post-EBS call
+    // will fault.  We also write a "boot-log.txt" marker here pre-EBS
+    // so the user can confirm from macOS that file-write is working at
+    // all.
+    g_brr_fs_root = 0;
+    {
+        efi_loaded_image_t *li = 0;
+        efi_status_t s = g_bs->handle_protocol(image_handle,
+            (efi_guid_t *)&LOADED_IMAGE_GUID, (void **)&li);
+        if (s == EFI_SUCCESS && li && li->device_handle) {
+            efi_brr_sfs_t *fs = 0;
+            s = g_bs->handle_protocol(li->device_handle,
+                (efi_guid_t *)&SFS_GUID, (void **)&fs);
+            if (s == EFI_SUCCESS && fs) {
+                efi_brr_file_t *root = 0;
+                s = fs->open_volume(fs, &root);
+                if (s == EFI_SUCCESS && root) {
+                    g_brr_fs_root = root;
+                    // Write a pre-EBS marker file proving BS file-I/O works
+                    // on this USB stick.  If this file appears after a
+                    // reboot, infrastructure is good.  Name: \brr-boot.txt
+                    static efi_char16_t marker_path[] = {
+                        '\\','b','r','r','-','b','o','o','t','.','t','x','t', 0
+                    };
+                    efi_brr_file_t *f = 0;
+                    s = root->open(root, &f, marker_path,
+                        EFI_BRR_FILE_MODE_READ | EFI_BRR_FILE_MODE_WRITE |
+                        EFI_BRR_FILE_MODE_CREATE, 0);
+                    if (s == EFI_SUCCESS && f) {
+                        static const char msg[] =
+                            "BRR pre-EBS file-write test OK\n"
+                            "If you can read this on macOS, the USB ESP is writable\n"
+                            "from memtest efi_menu.  Next step is post-EBS write.\n";
+                        f->set_position(f, 0);
+                        uintn_t wlen = sizeof(msg) - 1;
+                        f->write(f, &wlen, (void *)msg);
+                        f->flush(f);
+                        f->close(f);
+                        con_puts("  [fs] wrote \\brr-boot.txt on USB (pre-EBS)\r\n");
+                    } else {
+                        con_puts("  [fs] open \\brr-boot.txt FAILED\r\n");
+                    }
+                } else {
+                    con_puts("  [fs] open_volume FAILED\r\n");
+                }
+            } else {
+                con_puts("  [fs] SFS protocol not on device_handle\r\n");
+            }
+        } else {
+            con_puts("  [fs] loaded-image device_handle NULL\r\n");
+        }
+    }
 
     // ---------------------------------------------------------------------------
     // Grub unattended mode: `brr_auto_page` or `brr_auto_chip` in the
