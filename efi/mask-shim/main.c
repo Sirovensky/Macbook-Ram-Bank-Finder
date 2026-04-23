@@ -79,6 +79,59 @@ static const CHAR16 * const MACOS_ALT_PATHS[] = {
 };
 
 // ---------------------------------------------------------------------------
+// Apple-specific EFI GUIDs used for Preboot resolution (per OpenCore's
+// OcAppleBootPolicyLib).  Calling FileProtocol->GetInfo() with these as the
+// info_type returns Apple-specific metadata:
+//
+//   AppleApfsVolumeInfo   — volume role bits (bit 4 = Preboot) + UUID
+//   AppleApfsContainerInfo — container UUID
+//   AppleBlessedSystemFile — device path straight to the blessed boot.efi
+//                             (if this volume has one)
+//   AppleBlessedSystemFolder — device path to blessed folder (containing
+//                              boot.efi)
+//
+// When present, AppleBlessedSystemFile lets us find boot.efi without
+// walking the Preboot UUID directory tree at all — single GetInfo call.
+// ---------------------------------------------------------------------------
+static const EFI_GUID APPLE_APFS_VOLUME_INFO_GUID = {
+    0x900C7693, 0x8C14, 0x58BA,
+    { 0xB4, 0x4E, 0x97, 0x45, 0x15, 0xD2, 0x7C, 0x78 }
+};
+static const EFI_GUID APPLE_APFS_CONTAINER_INFO_GUID = {
+    0x3533CF0D, 0x685F, 0x5EBF,
+    { 0x8D, 0xC6, 0x73, 0x93, 0x48, 0x5B, 0xAF, 0xA2 }
+};
+static const EFI_GUID APPLE_BLESSED_SYSTEM_FILE_INFO_GUID = {
+    0xCA7E4814, 0x2ADC, 0x4ADD,
+    { 0xAB, 0xFF, 0x73, 0x4E, 0x3C, 0xFE, 0x13, 0xC3 }
+};
+static const EFI_GUID APPLE_BLESSED_SYSTEM_FOLDER_INFO_GUID = {
+    0x6D1840E7, 0x0A8B, 0x4B6A,
+    { 0xA8, 0xD5, 0x47, 0x5C, 0xD1, 0x47, 0xF3, 0xBB }
+};
+
+// Our own image handle, set at efi_main entry.  LoadImage's ParentImageHandle
+// param must be the caller's handle (per UEFI spec 7.4.1), not the target
+// file's device handle — passing the wrong handle can cause the firmware to
+// reject unsigned-chain loads on stricter implementations.
+static EFI_HANDLE g_self_image = NULL;
+
+// APFS volume role flags (per AppleApfsInfo.h in OpenCore).
+#define APPLE_APFS_VOLUME_ROLE_SYSTEM   (1 << 0)
+#define APPLE_APFS_VOLUME_ROLE_PREBOOT  (1 << 4)
+#define APPLE_APFS_VOLUME_ROLE_RECOVERY (1 << 2)
+#define APPLE_APFS_VOLUME_ROLE_DATA     (1 << 6)
+
+// AppleApfsVolumeInfo struct layout (first 4 bytes = always-version=1, then
+// role flags u32, then UUID bytes).  OpenCore header defines a full struct
+// but we only need the role field.
+typedef struct {
+    UINT32   Always1;
+    UINT32   Role;
+    UINT8    Uuid[16];
+} APPLE_APFS_VOLUME_INFO;
+
+// ---------------------------------------------------------------------------
 // Forward declarations
 // ---------------------------------------------------------------------------
 static EFI_STATUS read_badmem(EFI_SYSTEM_TABLE *st, EFI_HANDLE image_handle,
@@ -1013,11 +1066,13 @@ static EFI_STATUS try_path(EFI_SYSTEM_TABLE *st,
     EFI_DEVICE_PATH_PROTOCOL *dp = NULL;
     (void)build_file_device_path(st, device, path, &dp);
 
-    // LoadImage with SourceBuffer.  BootPolicy=FALSE for buffer-backed
-    // loads (we're not delegating to firmware boot manager).
+    // LoadImage with SourceBuffer.  BootPolicy=FALSE is correct when the
+    // source is a buffer (OpenCore does the same — DefaultEntryChoice.c
+    // line 1634).  ParentImageHandle must be OUR image (g_self_image);
+    // passing target's device handle here is a spec violation.
     EFI_HANDLE loaded = NULL;
-    s = st->BootServices->LoadImage(0, device, dp, buf, (UINTN)file_size,
-                                     &loaded);
+    s = st->BootServices->LoadImage(0, g_self_image, dp, buf,
+                                     (UINTN)file_size, &loaded);
     st->BootServices->FreePool(buf);  // firmware copied what it needed
     if (s != EFI_SUCCESS) {
         if (dp) st->BootServices->FreePool(dp);
@@ -1110,6 +1165,66 @@ static EFI_STATUS bfs_find_boot_efi(EFI_FILE_PROTOCOL *cur,
     return EFI_NOT_FOUND;
 }
 
+// Tier-0 fast path: GetInfo(AppleBlessedSystemFile) on the volume root
+// returns a device path whose last MediaFilePath node is boot.efi's
+// on-volume path.  Parse it out as a CHAR16 string so try_path can
+// open+read+LoadImage(SourceBuffer) it like any other candidate.
+//
+// Returns EFI_SUCCESS and writes the extracted path into `out_file_path`
+// (buffer of out_cap CHAR16 slots).  Returns EFI_NOT_FOUND if the volume
+// has no blessed-file info.
+static EFI_STATUS apple_bless_get_path(EFI_FILE_PROTOCOL *root,
+                                        CHAR16 *out_file_path,
+                                        UINTN   out_cap)
+{
+    if (!root || !out_file_path || out_cap < 2) return EFI_INVALID_PARAMETER;
+
+    static UINT8 info_buf[1024];
+    UINTN info_sz = sizeof(info_buf);
+    EFI_STATUS s = root->GetInfo(root,
+        (EFI_GUID *)&APPLE_BLESSED_SYSTEM_FILE_INFO_GUID,
+        &info_sz, info_buf);
+    if (s != EFI_SUCCESS || info_sz < 4) return EFI_NOT_FOUND;
+
+    // Walk device-path nodes, concatenating MediaFilePath components.
+    UINTN pos = 0;
+    out_file_path[0] = 0;
+    const UINT8 *p = info_buf;
+    const UINT8 *end = info_buf + info_sz;
+    while (p + 4 <= end) {
+        UINT8 t = p[0];
+        UINT8 sub = p[1];
+        UINT16 nlen = (UINT16)p[2] | ((UINT16)p[3] << 8);
+        if (nlen < 4 || p + nlen > end) break;
+        if (t == 0x7f && sub == 0xff) break;   // End
+        if (t == 4 && sub == 4) {              // MediaFilePath
+            const CHAR16 *src = (const CHAR16 *)(p + 4);
+            UINTN chars = (nlen - 4) / 2;
+            for (UINTN i = 0; i < chars && src[i] != 0 && pos + 1 < out_cap; i++) {
+                out_file_path[pos++] = src[i];
+            }
+        }
+        p += nlen;
+    }
+    out_file_path[pos] = 0;
+    return pos > 0 ? EFI_SUCCESS : EFI_NOT_FOUND;
+}
+
+// Query APFS volume role via AppleApfsVolumeInfo GetInfo.  Returns the
+// role flags, or 0 if not an APFS volume / no info / error.
+static UINT32 apple_apfs_volume_role(EFI_FILE_PROTOCOL *root)
+{
+    if (!root) return 0;
+    static UINT8 info_buf[512];
+    UINTN info_sz = sizeof(info_buf);
+    EFI_STATUS s = root->GetInfo(root,
+        (EFI_GUID *)&APPLE_APFS_VOLUME_INFO_GUID,
+        &info_sz, info_buf);
+    if (s != EFI_SUCCESS || info_sz < sizeof(APPLE_APFS_VOLUME_INFO)) return 0;
+    APPLE_APFS_VOLUME_INFO *avi = (APPLE_APFS_VOLUME_INFO *)info_buf;
+    return avi->Role;
+}
+
 // Try each candidate macOS boot.efi path under `root` on the given handle.
 // Returns EFI_SUCCESS on first hit, writing *out_path via build_file_device_path.
 //
@@ -1132,6 +1247,42 @@ static EFI_STATUS try_open_candidates(EFI_SYSTEM_TABLE *st,
                                        EFI_HANDLE *out_image)
 {
     static CHAR16 full_path[512];
+
+    // Tier 0 (fast path): AppleBlessedSystemFile on the volume root.
+    // If present, returns the exact on-volume path to boot.efi directly
+    // — no directory walking, no guessing which UUID is which.
+    {
+        EFI_STATUS bs = apple_bless_get_path(
+            root, full_path, sizeof(full_path)/sizeof(full_path[0]));
+        if (bs == EFI_SUCCESS) {
+            efi_print(st, L"[shim]    blessed path: ");
+            efi_print(st, full_path);
+            efi_print(st, L"\r\n");
+            EFI_STATUS ts = try_path(st, device, root, full_path,
+                                      out_path, out_image);
+            if (ts == EFI_SUCCESS) return ts;
+            efi_print(st, L"[shim]    blessed try_path status=");
+            efi_print_hex(st, (UINT64)ts);
+            efi_print(st, L" (falling through)\r\n");
+        }
+    }
+
+    // APFS role hint: if this is a Preboot volume, log it — greatly
+    // increases the chance tier-2 UUID scan below matches.
+    {
+        UINT32 role = apple_apfs_volume_role(root);
+        if (role) {
+            efi_print(st, L"[shim]    APFS role=");
+            efi_print_hex(st, (UINT64)role);
+            if (role & APPLE_APFS_VOLUME_ROLE_PREBOOT)
+                efi_print(st, L" (Preboot)");
+            if (role & APPLE_APFS_VOLUME_ROLE_SYSTEM)
+                efi_print(st, L" (System)");
+            if (role & APPLE_APFS_VOLUME_ROLE_RECOVERY)
+                efi_print(st, L" (Recovery)");
+            efi_print(st, L"\r\n");
+        }
+    }
     EFI_STATUS s;
 
     // Tier 1: fixed root-level candidates.
@@ -1848,6 +1999,8 @@ static int shim_is_installed(EFI_SYSTEM_TABLE *st, EFI_HANDLE image)
 
 EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 {
+    g_self_image = image;  // needed by try_path's LoadImage call
+
     st->ConOut->ClearScreen(st->ConOut);
     efi_print(st, L"BRR mask-shim v1\r\n");
     efi_print(st, L"=====================================\r\n");
